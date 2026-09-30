@@ -194,7 +194,18 @@ def _url_payload_command(n: int) -> str:
 #: helper strips a local-drive namespace prefix and a default-stream suffix, and
 #: ``_candidate_forms`` resolves the folded spelling while keeping the raw one as a
 #: candidate. No target, no matching rule and no threshold moved.
-_PACKAGE_LINE_BUDGET = 28_572
+#:
+#: Raised for the recursive-force ``rm`` deletion floor in the ``rm_floor.py`` sibling
+#: module: an argv-structural gate that reads the ``rm`` command's own argv (flags in
+#: any position/spelling, the ``$HOME``/``~``/glob targets, brace-expanded flags and
+#: operands). It is a UNION with the two catalog regexes, which stay in the ``re`` tier
+#: as a fail-closed deny-net, and the ``grep`` inert-search carve-out
+#: (``_DENY_EXCEPTIONS``) narrows the regex's one false positive. A per-argv ``rm``-span
+#: cap (``_RM_CLASSIFY_SPAN_CAP``) and the mover-operand skip keep the synchronous gate
+#: linear on a hostile input. The floor delegates substitution/backtick/xargs/brace
+#: scanning to the shared ``shell_normalizer`` / ``argv_floor`` helpers rather than
+#: carrying private copies.
+_PACKAGE_LINE_BUDGET = 31_260
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
