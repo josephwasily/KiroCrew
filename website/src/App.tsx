@@ -34,6 +34,7 @@ import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import { useKiroUsageReadout, kiroUsageSegment } from './shell/topbar/kiroUsageReadout'
 import { safeSetItem } from './utils/safeStorage'
+import { clearFeatureNewTag, landFeatureGhost, useFeatureNewTag } from './utils/featureNewTag'
 import { gcOrphanedStorage } from './utils/storageGc'
 import { useMetricsReadout, metricsSegment, MetricsCard, MetricsErrorNotice } from './shell/topbar/metricsReadout'
 import { Rocket, Bell, Code, RefreshCw, Package, Download, Hammer, XCircle, Check, AlertTriangle, X, Coins, Compass, LayoutGrid, Fullscreen, Menu, SquareTerminal, Bot, Smartphone, Search as SearchIcon } from 'lucide-react'
@@ -557,8 +558,36 @@ export function NavBadge({ navId, collapsed, appBadges, runState }: { navId: str
   const builtinLabel = surface?.badgeLabel ?? i18nT('app.updates')
   const activityCount = useAppSelector(selectSurfaceActivityCount(navId))
   const activityLabel = surface?.activityLabel ?? 'in flight'
+  // The "New" tag a feature intro's "Not now" handed to this row. It clears the
+  // first time the route opens, by any path (this row, a link, the address bar).
+  const newTag = useFeatureNewTag(navId)
+  const { pathname } = useLocation()
+  const onRoute = !!surface && (pathname === surface.route || pathname.startsWith(surface.route + '/'))
+  useEffect(() => {
+    if (!newTag || !onRoute) return
+    // The pill is still on screen for this frame: the ghost pops out of it and
+    // lands on the page, the reverse of the trip that delivered it.
+    const b = document.querySelector<HTMLElement>(`[data-feature-new-tag="${window.CSS.escape(navId)}"]`)?.getBoundingClientRect()
+    // A 17.4px ghost centred on the pill, as in the approved mock.
+    landFeatureGhost(navId, b ? { cx: b.left + b.width / 2, top: b.top + b.height / 2 - 8.7, height: 17.4, popIn: false } : null)
+    clearFeatureNewTag(navId)
+  }, [newTag, onRoute, navId])
+  // Collapsed, the only corner badge is the unread dot; the tag yields to it
+  // rather than stacking two marks on one icon.
+  const showNewTag = !!newTag && !(collapsed && builtinCount + dynamicCount > 0)
   return (
     <>
+      {showNewTag && (
+        <span
+          data-feature-new-tag={navId}
+          className={collapsed
+            ? 'absolute -top-1 right-0 z-10 bg-accent text-accent-fg text-[10px] font-bold leading-[12px] px-1 py-[1px] rounded-full border-2 border-bg'
+            : 'shrink-0 bg-accent text-accent-fg text-[10px] font-bold leading-[12px] px-1.5 py-[2px] rounded-full'}
+          style={newTag === 'arriving' ? { visibility: 'hidden' } : undefined}
+        >
+          {i18nT('components.startupVideoModal.new_tag')}
+        </span>
+      )}
       <ActivityIndicator count={activityCount} collapsed={collapsed} label={activityLabel} />
       <RunStateIndicator state={runState} collapsed={collapsed} label={runStateLabel(runState)} />
       <BadgeIndicator count={builtinCount} collapsed={collapsed} label={builtinLabel} />

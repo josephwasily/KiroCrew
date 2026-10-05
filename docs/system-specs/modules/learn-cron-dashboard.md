@@ -4157,7 +4157,7 @@ polled by this watchdog.
 |---|---|
 | `routes.tsx` | `lazyPage` and the query-keeping redirect elements the route table mounts |
 | `boot/terminalRestore.ts` | The two looks at the terminal sessions that rule on the restored docked and side-panel terminal tabs; the ruling stays with `useBottomTerminal` and `usePanelTabs` |
-| `boot/firstRun.tsx`, `boot/startupVideo.tsx` | The first-run chapters (Import setup, Privacy, the Customize tour, Meet CrewMates) in `OnboardingShellHost`; the startup feature clip and what it yields to |
+| `boot/firstRun.tsx`, `boot/startupVideo.tsx` | The first-run chapters (Import setup, Privacy, the Customize tour) in `OnboardingShellHost`; the startup feature clip and what it yields to |
 | `nav/navItems.ts`, `nav/navTip.ts`, `nav/appRail.tsx`, `nav/railBadges.ts`, `nav/routeActive.ts`, `nav/railChrome.tsx` | The rail: its static descriptors, the collapsed-row hover label, `advertisedNavItems` and the Apps order (drag reorder, hidden slots), the app, approval, Discover and notification badge maps and the apps' run states (`NavBadge` in `App.tsx` adds the registry's own counts and draws every indicator), the lit row, and the brand row and community links |
 | `nav/mobileConnect.tsx`, `nav/developerMode.ts` | The phone-connection methods behind the "Connect your phone" row, and its dialog; developer mode as the Developer row reads it |
 | `topbar/metricsReadout.tsx`, `topbar/kiroUsageReadout.tsx`, `topbar/requestFeature.ts` | The readout capsule's system-metrics segment and hover card, its Kiro credit segment, and Request a Feature |

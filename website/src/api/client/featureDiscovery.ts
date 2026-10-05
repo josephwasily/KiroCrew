@@ -47,6 +47,11 @@ export interface FeatureVideo {
    *  that from `FeatureVideoStatus`, and a second copy on the clip had no
    *  reader. */
   source?: 'local' | 'remote'
+  /** In-dashboard route for "Try it" (e.g. `/members`). When set,
+   *  the footer is "Not now" / "Try it" with no header close, and "Not now"
+   *  hands a "New" tag to the rail item for that route. Absent on older
+   *  gateways and on intros with no call to action. */
+  cta_route?: string
 }
 
 /** GET /api/feature-videos/next.
