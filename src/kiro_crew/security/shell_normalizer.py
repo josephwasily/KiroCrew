@@ -122,14 +122,6 @@ def _substitution_program(token: str) -> str:
     return token.rsplit(None, 1)[-1] if token.split() else token
 
 
-#: Upper bound on ``_program_basename``'s wrapper-peel fixed-point loop. A real
-#: program token resolves in a few layers (a wrapper or two plus a redirect); the
-#: cap is far above that, so only a pathological nested-wrapper attack token hits
-#: it, where it bounds the O(depth x length) peel to keep the synchronous gate off
-#: the watchdog.
-_PROGRAM_BASENAME_PEEL_CAP = 64
-
-
 def _program_basename(token: str) -> str:
     """The program name a token invokes, with shell wrappers stripped.
 
@@ -152,19 +144,7 @@ def _program_basename(token: str) -> str:
         return ""
     previous = ""
     substituted = False
-    # Each pass strips at most a one-char wrapper prefix while
-    # ``_strip_redirect`` / ``_resolve_param_defaults`` / the empty-subst sub each
-    # rescan the WHOLE remaining token, so a pathologically nested wrapper run
-    # (``"$(" * 8000 + … + ")" * 8000``) peels one layer per pass over a still-huge
-    # string -> O(depth x length), 15s+ on the synchronous gate (GPT security-class:
-    # repeated/nested operands must not exhaust the watchdog). A real program token
-    # carries only a handful of wrapper layers; cap the fixed-point peel far above
-    # that. Past the cap the token is left as-is and compared literally -- it names
-    # no real program, so it fails CLOSED, and a contiguous ``rm -rf /`` / ``~`` run
-    # is still caught by the whole-text catalog regex.
-    peels_left = _PROGRAM_BASENAME_PEEL_CAP
-    while token != previous and peels_left > 0:
-        peels_left -= 1
+    while token != previous:
         previous = token
         token = _strip_redirect(token)
         token = _resolve_param_defaults(token)
@@ -1380,529 +1360,30 @@ def _array_assignments(tokens: "list[str]") -> "dict[str, str]":
     return arrays
 
 
-def _strip_outer_quotes(token: str) -> str:
-    """Remove only a MATCHING pair of surrounding quotes, keeping interior chars.
-
-    Unlike :func:`_dequote_token` (which collapses ALL quotes and backslashes), this
-    preserves interior backslash escapes so a ``printf`` format's ``\\n`` survives to
-    :func:`_decode_printf_escapes`. ``'%s\\n'`` -> ``%s\\n``, ``"$HOME"`` -> ``$HOME``.
-    """
-    t = token
-    while len(t) >= 2 and t[0] == t[-1] and t[0] in ("'", '"'):
-        t = t[1:-1]
-    return t
-
-
-def _static_producer_output(producer: "list[str]") -> "str | None":
-    """The STATIC stdout of an ``echo``/``printf`` producer, or ``None``.
-
-    ``xargs`` consumes a producer's STDOUT, so the operand ``rm`` ultimately sees is
-    the producer's OUTPUT, not its source spelling (GPT 6.1 F2: ``printf '/%s' '' |
-    xargs rm -fr`` wipes ``/``; the format string ``'/%s'`` is not the output). Only
-    ``echo``/``printf`` with literal arguments have a statically-known output; any
-    other producer (``find``/``ls`` whose stdout != argv) returns ``None`` so its
-    legit disk reclaim stays unclassified (Security Scope).
-
-    The returned string is LITERAL argv text (quotes already removed), joined by
-    spaces -- the caller hands it to the operand classifier as data, never back to a
-    shell parser.
-    """
-    if not producer:
-        return None
-    name = _program_basename(producer[0])
-    if name not in ("echo", "printf"):
-        return None
-    raw = [a for a in producer[1:] if not (name == "echo" and a in ("-n", "-e", "-E"))]
-    if name == "echo":
-        # ``echo`` does not interpret backslash escapes by default -> fully dequote
-        # each operand and join with single spaces (its real stdout separator).
-        return " ".join(_dequote_token(a) for a in raw)
-    # ``printf FORMAT [ARG...]`` -- evaluate the LITERAL format against the literal
-    # args, bounded to the common ``%s`` case. Strip only the OUTER quotes so
-    # interior escapes (``\\n``) survive for ``_decode_printf_escapes``; a full
-    # dequote would drop the backslash and glue the ``n`` onto the operand. A format
-    # we cannot evaluate falls through to ``None`` -- fail toward not-classified,
-    # never conjure a target. ``printf`` with no ``%`` is its format text verbatim.
-    args = [_strip_outer_quotes(a) for a in raw]
-    if not args:
-        return None
-    fmt, rest = args[0], args[1:]
-    if "%" not in fmt:
-        return _decode_printf_escapes(fmt)
-    if "%s" in fmt and all(spec == "s" for spec in _PRINTF_PERCENT_RE.findall(fmt)):
-        # ``printf`` REUSES its format for every batch of args until all are consumed
-        # (GPT 6.1 F1: ``printf '%s\\n' ./build ~`` emits BOTH ``./build`` and ``~``,
-        # so dropping the trailing args hid the home operand). Emit the format once
-        # per group of ``%s`` placeholders, cycling through all args; decode escapes
-        # (``\\n`` etc.) to whitespace so a format-terminating newline becomes the
-        # xargs word separator it really is.
-        n_spec = fmt.count("%s")
-        pieces: "list[str]" = []
-        i = 0
-        rest = rest or [""]
-        while i < len(rest):
-            batch = rest[i : i + n_spec]
-            # Pad a short final batch with empty strings, as ``printf`` does.
-            batch = batch + [""] * (n_spec - len(batch))
-            out = fmt
-            for a in batch:
-                out = out.replace("%s", a, 1)
-            pieces.append(out)
-            i += n_spec
-        return _decode_printf_escapes("".join(pieces))
-    return None
-
-
-_PRINTF_PERCENT_RE = re.compile(r"%(.)")
-
-
-def _xargs_pipelines(tokens: "list[str]") -> "list[tuple[int, int]]":
-    """Every executed ``xargs`` invocation and the pipe that feeds it.
-
-    Yields ``(pipe_index, xargs_index)`` for EACH ``xargs`` that has a pipe
-    actually feeding it, left to right. A line can run several independent xargs
-    pipelines (``echo ./build | xargs rm -fr; echo ~ | xargs rm -fr``), and only
-    reconstructing the first let a later ``echo ~ | xargs rm -fr`` wipe home
-    undetected (GPT 6.1 F1). Each pipe is the one IMMEDIATELY preceding its xargs'
-    own pipeline segment -- the last ``|`` before that ``xargs`` not separated from
-    it by a command terminator -- so an unrelated earlier pipeline (``true | cat;
-    echo ~ | xargs rm -fr``) binds to its OWN producer, and an inert earlier
-    ``xargs`` mention with no feeding pipe (``echo xargs; echo ~ | xargs rm -fr``)
-    is skipped rather than ending the search (GPT 6.1 F2).
-    """
-    found: "list[tuple[int, int]]" = []
-    # ── O(n) forward pass: compute each position's nearest feeding pipe ──
-    # A single left-to-right scan replaces the O(n) backward walk per ``xargs``
-    # token, so a flood of 3300 ``xargs`` in one segment costs O(n) total instead
-    # of O(n²) (GPT 6.1 :1517, gateway stall past 25s). ``cur_pipe`` tracks the
-    # last pipe index within the current pipeline segment; only a REAL command
-    # terminator resets it -- a ``{`` / ``(`` group opener does not end the
-    # pipeline it is fed by (``echo token | { xargs kirocrew; }``; Opus 5.5).
-    n = len(tokens)
-    seg_pipe_for: "list[int]" = [-1] * n
-    cur_pipe = -1
-    for idx in range(n):
-        tk = tokens[idx]
-        if _xargs_is_pipe(tk):
-            cur_pipe = idx
-        elif _xargs_ends_command(tk):
-            cur_pipe = -1
-        seg_pipe_for[idx] = cur_pipe
-
-    # ── Iterate xargs tokens, one rebuild per segment ──
-    seen_segments: "set[int]" = set()
-    for xargs_at in range(n):
-        if _program_basename(tokens[xargs_at]) != "xargs" or xargs_at <= 0:
-            continue
-        seg_pipe = seg_pipe_for[xargs_at]
-        if seg_pipe < 0:
-            continue  # no feeding pipe for this xargs' segment
-        # Each pipeline segment is reconstructed ONCE: a later ``xargs`` bound to
-        # the SAME feeding pipe is an operand of the first, not a new invocation,
-        # so skip it (GPT 6.1 :1517 -- a 3300-``xargs`` flood otherwise rebuilds
-        # thousands of overlapping suffixes and stalls the synchronous gate).
-        if seg_pipe in seen_segments:
-            continue
-        # The segment's program word is the first token after the pipe that is not a
-        # ``VAR=`` assignment, a ``{``/``(`` group-opener or a REDIRECTION prefix
-        # (``2>/dev/null`` can sit before the program word; Opus 5.5).
-        prog_at = seg_pipe + 1
-        while prog_at < xargs_at and (
-            _XARGS_ASSIGN_RE.match(tokens[prog_at])
-            or tokens[prog_at] in ("{", "(")
-            or _XARGS_REDIR_RE.match(tokens[prog_at])
-        ):
-            prog_at += 1
-        chain = tokens[prog_at:xargs_at]
-        # ``xargs`` is the executed program UNLESS the segment's program word is a
-        # known DATA-CONSUMER (``echo``/``printf``/``cat`` …) whose operands are inert
-        # strings -- then this ``xargs`` is one of those operands (``echo harmless |
-        # echo xargs xargs …``) and is skipped, which also avoids the O(operands)
-        # per-operand suffix scan (26s; GPT 6.1 F2). An UNKNOWN launcher
-        # (``taskset``/``strace``/``eval`` -- not a data-consumer) is treated as an
-        # exec-wrapper, so ``xargs`` stays at program position and does not fail open
-        # (Opus 5.5 :1511). An empty chain is a direct ``| xargs``.
-        if not chain or _program_basename(chain[0]) not in _XARGS_DATA_CONSUMERS:
-            found.append((seg_pipe, xargs_at))
-            seen_segments.add(seg_pipe)
-    return found
-
-
-#: Programs whose operands are inert data words, so an ``xargs`` among them is NOT at
-#: program position. The launcher test is a denylist of THESE rather than an allowlist
-#: of wrappers, so an unknown exec-wrapper still counts as program position and cannot
-#: fail the ``xargs`` payload rebuild open (Opus 5.5 :1511).
-_XARGS_DATA_CONSUMERS = {
-    "echo",
-    "printf",
-    "print",
-    "cat",
-    "tac",
-    "head",
-    "tail",
-    "yes",
-    "seq",
-    "true",
-    "false",
-    "test",
-    "[",
-}
-
-#: A redirection token (``2>/dev/null``, ``>out``, ``<in``, ``&>f``) that can sit before
-#: the program word in a pipeline segment.
-_XARGS_REDIR_RE = re.compile(r"^(?:[0-9]*[<>]|&>|<&|>&)")
-
-
-#: A ``VAR=value`` assignment prefix (``FOO=1 xargs …``).
-_XARGS_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-
-def _xargs_active_chars(token: str) -> str:
-    """The characters of *token* that are shell SYNTAX (unquoted, unescaped)."""
-    return "".join(s.char for s in _iter_shell_chars(token) if s.active)
-
-
-def _xargs_is_pipe(token: str) -> bool:
-    """True if *token* carries a REAL pipe -- a quoted ``'a|b'`` is a filename."""
-    return token != "||" and "|" in token and "|" in _xargs_active_chars(token)
-
-
-def _xargs_group_opener(token: str) -> bool:
-    """True for a ``{`` / ``(`` group or ``f(){`` body opener -- it starts the
-    producer's own command, so the producer is read after it."""
-    return token.rstrip("{") in {"", "("} or token.rstrip("{").endswith("()")
-
-
-def _xargs_ends_command(token: str) -> bool:
-    """True if *token* is a real command terminator for the xargs pipeline scan.
-
-    Quote-aware: a producer operand ``'a;b'`` is ONE literal argv word, and
-    reading its ``;`` as a separator truncated the producer and hid the home
-    operand after it (GPT 6.1: ``printf '%s\\n' 'a;b' "$HOME" | xargs rm -fr``).
-    A ``{`` / ``(`` group opener is not a terminator of the pipeline that feeds it.
-    """
-    if token in {"&", "&&", "||", ";", ";;", "\n"}:
-        return True
-    if token.startswith("#"):
-        return True
-    return any(c in ";|\n" for c in _xargs_active_chars(token))
-
-
-def _xargs_reconstructed_command(tokens: "list[str]") -> "list[str]":
-    """The commands ``xargs`` will run, rebuilt from its argv plus the piped words.
+def _xargs_reconstructed_command(tokens: "list[str]") -> str:
+    """The command ``xargs`` will run, rebuilt from its argv plus the piped words.
 
     ``xargs`` appends the words it reads on stdin to the command given as its own
     arguments, so ``echo <verb> | xargs <name>`` executes ``<name> <verb>``.  Neither
     side contains a space, so the whole-token payload scan cannot see it; rebuilding the
     effective command line makes it visible to the ordinary argv checks.
-
-    Returns ONE rebuilt command per executed ``xargs`` pipeline on the line (GPT 6.1
-    F1), with ``xargs``' own flags stripped from the result; the caller classifies
-    each. An empty list means no piped ``xargs`` was found.
     """
-    out: "list[str]" = []
-    for pipe, xargs_at in _xargs_pipelines(tokens):
-        out.extend(r for r in _reconstruct_one_xargs(tokens, pipe, xargs_at, keep_flags=False) if r)
-    return out
-
-
-def _rm_glued_boundary_index(token: str) -> "int | None":
-    """Index of the first unquoted command-separator in *token*, or ``None``.
-
-    Recovers the argv PREFIX glued to a separator (``-fr;`` -> ``-fr``) so a
-    reconstructed xargs command keeps its flags up to the boundary (GPT 6.1 F1).
-    Mirrors :func:`_ends_argv`'s boundary set (``;`` / ``&`` / ``|`` / newline, and a
-    leading ``#`` comment); a backslash escapes the next char.
-    """
-    if token.startswith("#"):
-        return 0
-    k = 0
-    n = len(token)
-    while k < n:
-        ch = token[k]
-        if ch == "\\":
-            k += 2
-            continue
-        if ch in ";&|\n#":
-            return k
-        k += 1
-    return None
-
-
-def _reconstruct_one_xargs(
-    tokens: "list[str]", pipe: int, xargs_at: int, *, keep_flags: bool
-) -> "list[str]":
-    """Rebuild the command ONE ``xargs`` pipeline runs, as a classifiable argv string.
-
-    ``keep_flags`` controls whether the invoked command's OWN flags survive AND how
-    the producer is modelled:
-
-    * ``True`` (rm-floor): keep ``rm``'s ``-fr``/``-rf`` and resolve the producer to
-      its STATIC stdout, so a ``/``-descendant operand stays allowed and only a
-      genuine root/home target denies. A non-static producer (``find``/``ls`` whose
-      stdout != argv) stays UNCLASSIFIED, so a legit ``find ~ … | xargs rm -rf``
-      disk reclaim is not newly refused (Security Scope).
-    * ``False`` (general payload scan, e.g. the credential-mint rule): strip the
-      invoked command's flags and APPEND the producer's literal non-flag words --
-      the shape the token walk reads, exactly as the base helper did. Here the
-      producer need NOT be echo/printf (``yes token | head -1 | xargs kirocrew``
-      runs ``kirocrew token``); a static-only model regressed that deny (Opus 5.5).
-
-    The invoked command's own tokens, and the replace token, are shell-dequoted so a
-    quoted replace token (``-I'{}'`` / ``'{}'``) and a quoted operand are read as the
-    argv the shell builds, not as source (GPT 6.1 F2/F3). The command is BOUNDED to
-    xargs' own segment -- a trailing ``; true`` / ``&& x`` / ``| y`` is NOT part of
-    rm's argv (GPT 6.1 F2: ``echo "$HOME" | xargs rm -fr ; true``).
-    """
-    if pipe <= 0 or xargs_at == -1:
-        return []
-    # Bound xargs' argv to its OWN command segment: stop at the first command
-    # terminator after it (``;`` / ``|`` / ``&&`` / ``||`` / newline / ``#``), so a
-    # trailing command's tokens never fold into the reconstructed rm argv.
-    seg_end = len(tokens)
-    glued_prefix = ""  # argv text before a glued separator on the boundary token
-    for q in range(xargs_at + 1, len(tokens)):
-        tk = tokens[q]
-        if _xargs_is_pipe(tk):
-            seg_end = q
-            break
-        if tk in ("&&", "||", ")", "}"):
-            # ``)`` / ``}`` close the group the xargs runs in (``echo token | (
-            # xargs kirocrew )``): the closer is not an argument of the command.
-            seg_end = q
-            break
-        if _xargs_ends_command(tk):
-            seg_end = q
-            # A GLUED separator (``-fr;``) carries the invoked command's argv BEFORE
-            # the ``;``; keep that prefix so the recursive-force flags are not dropped
-            # (GPT 6.1 F1: ``echo ~ | xargs rm -fr; true`` must classify ``rm -fr``,
-            # not a flagless ``rm``). Split at the first unquoted boundary char.
-            boundary = _rm_glued_boundary_index(tk)
-            if boundary is not None and boundary > 0:
-                glued_prefix = tk[:boundary]
-            break
-    rest = tokens[xargs_at + 1 : seg_end]
-    if glued_prefix:
-        rest = rest + [glued_prefix]
-    k = 0
-    # Options that take the NEXT word as their value (GNU xargs). ``-i``/``-l``/``-e``
-    # are NOT here: bare, they take NO argument (Opus 5.5 -- a bare ``-i``/``-l``
-    # otherwise swallowed the program word ``kirocrew``, losing the credential-mint
-    # deny). Their optional values are ATTACHED only (``-i{}`` / ``-l5``).
-    value_opts = {"-L", "-n", "-P", "-s", "-d", "-E", "-a"}
-    replace_mode = False
-    replace_token = "{}"
-    while k < len(rest) and rest[k].startswith("-"):
-        opt = rest[k]
-        k += 1
-        # ``-i`` / ``-I`` / ``--replace`` is replace-string mode. ``is_denied``
-        # LOWERCASES the command first, so ``-I %`` arrives as ``-i %`` and the two
-        # cannot be told apart by case (Opus 5.5). An ATTACHED value (``-i{}`` /
-        # ``-I{}``) is the token; otherwise consume the NEXT word as the replace
-        # token ONLY when it RECURS later in the command argv (the real replacement
-        # site, as in ``-I % kirocrew %``) -- not when the next word is the invoked
-        # PROGRAM (``-i kirocrew {}``: ``kirocrew`` does not recur, ``{}`` does), so
-        # the program word is never swallowed (Opus 5.5 round-4 credential-mint).
-        if opt == "-i" or opt == "-I" or opt.startswith(("-i", "-I")):
-            replace_mode = True
-            if opt not in ("-i", "-I"):
-                replace_token = opt[2:] or "{}"
-            elif k < len(rest) and not rest[k].startswith("-") and rest[k] in rest[k + 1 :]:
-                replace_token = rest[k]
-                k += 1
-            # else: bare ``-i``/``-I`` with no recurring next word -> default ``{}``.
-            continue
-        if opt in value_opts and k < len(rest):
-            k += 1
-    command = rest[k:]
-    if not keep_flags:
-        # Strip the invoked command's flags: only its name and non-flag args matter
-        # to the general payload scan (``echo <verb> | xargs <name>`` -> ``<name>``).
-        command = [tk for tk in command if not tk.startswith("-")]
+    pipe = next((i for i, tk in enumerate(tokens) if "|" in tk), -1)
+    if pipe <= 0:
+        return ""
+    xargs_at = next(
+        (i for i in range(pipe + 1, len(tokens)) if _program_basename(tokens[i]) == "xargs"),
+        -1,
+    )
+    if xargs_at == -1:
+        return ""
+    # Skip xargs' own options; everything after them is the command it runs.
+    command = [tk for tk in tokens[xargs_at + 1 :] if not tk.startswith("-")]
+    # The producer's literal words (its program name is not piped through).
+    piped = [tk for tk in tokens[1:pipe] if not tk.startswith("-")]
     if not command:
-        return []
-    # Shell-dequote the invoked command's own tokens and the replace token so a
-    # quoted replace token or operand is read as the argv the shell builds, not as
-    # source (GPT 6.1 F2/F3).
-    command = [_dequote_token(tk) for tk in command]
-    replace_token = _dequote_token(replace_token)
-    # The producer feeding THIS xargs is the LAST command segment before its pipe.
-    seg_start = 0
-    for p in range(pipe - 1, -1, -1):
-        if _xargs_ends_command(tokens[p]) or _xargs_group_opener(tokens[p]):
-            seg_start = p + 1
-            break
-    producer = tokens[seg_start:pipe]
-    if not keep_flags:
-        # General scan: APPEND the producer chain's literal DATA words (base helper
-        # behaviour) -- the producer need not be echo/printf, and the exact stdout
-        # does not matter to a program-name/payload scan. Across a multi-stage
-        # producer (``yes token | head -1 | xargs kirocrew`` must rebuild ``kirocrew
-        # token``), the chain spans INTERMEDIATE pipes, so bound it only at a real
-        # command terminator (``;`` / ``&&`` / ``||`` / newline), NOT at a pipe.
-        chain_start = 0
-        for p in range(pipe - 1, -1, -1):
-            tk = tokens[p]
-            if tk in ("&&", "||") or (
-                (_xargs_ends_command(tk) or _xargs_group_opener(tk)) and not _xargs_is_pipe(tk)
-            ):
-                chain_start = p + 1
-                break
-        chain = tokens[chain_start:pipe]
-        # Append the data words only from stages whose STDOUT equals their argv data
-        # words (``echo``/``printf``/``yes``/``head``/``cat``/``tr``). A FILTER stage
-        # (``grep -v kirocrew``, ``sed``) emits its stdin MINUS/transformed, not its
-        # own argv, so appending ``kirocrew`` from ``grep -v kirocrew`` would put the
-        # product name into a rebuilt ``kill`` argv and falsely refuse a legit
-        # ``ps | grep -v kirocrew | xargs kill`` (Security Scope). Base appended only
-        # the FIRST stage's words; this keeps the first stage always and widens to
-        # LATER stages only when their program is static-output.
-        static_out = {"echo", "printf", "yes", "head", "cat", "tr", "seq"}
-        piped: "list[str]" = []
-        stage_words: "list[str]" = []
-        stage_prog = ""
-        at_prog = True
-        first_stage = True
-
-        def _flush() -> None:
-            if first_stage or _program_basename(stage_prog) in static_out:
-                piped.extend(stage_words)
-
-        for tk in chain:
-            if _xargs_is_pipe(tk):
-                _flush()
-                stage_words = []
-                stage_prog = ""
-                at_prog = True
-                first_stage = False
-                continue
-            if at_prog:
-                stage_prog = tk
-                at_prog = False
-                continue  # a stage's program token is not piped through
-            if tk.startswith("-"):
-                continue
-            stage_words.append(tk)
-        _flush()
-        if not piped:
-            # The bounded chain yielded no data word -- a ``;`` inside an open group
-            # (``{ echo token; } | xargs kirocrew``) truncated the chain at the inner
-            # terminator, leaving only the group closer. Fall back to collecting the
-            # data words of a static-output stage anywhere before the pipe, so the
-            # producer word survives (Opus 5.5) WITHOUT pulling a filter stage's argv.
-            fb_prog = ""
-            fb_at_prog = True
-            for tk in tokens[:pipe]:
-                if "|" in tk or tk in ("&&", "||", ";"):
-                    fb_at_prog = True
-                    continue
-                bare = tk.strip("{}();")
-                if not bare:
-                    continue
-                if fb_at_prog:
-                    fb_prog = bare
-                    fb_at_prog = False
-                    continue
-                if bare.startswith("-"):
-                    continue
-                if _program_basename(fb_prog) in static_out:
-                    piped.append(bare)
-        appended = " ".join(command + [_dequote_token(p) for p in piped])
-        if replace_mode:
-            if not piped:
-                return [" ".join(command)]
-            # ``xargs -I`` runs the command ONCE PER INPUT RECORD, so every record is
-            # substituted and classified -- not only the first (GPT 6.1:
-            # ``printf '%s\\n' feature main | xargs -I{} git push --force origin {}``
-            # pushes ``main`` second). Records come from the producer's static
-            # output when it resolves (a printf format is not a record); otherwise
-            # each piped word is a record AND the base append shape is kept.
-            static = _static_producer_output(producer)
-            if static is not None:
-                return _xargs_replace_commands(command, replace_token, _xargs_output_words(static))
-            records = [_dequote_token(p) for p in piped]
-            return _xargs_replace_commands(command, replace_token, records) + [appended]
-        return [appended]
-    # rm-floor variant: resolve the producer to its STATIC stdout.
-    produced = _static_producer_output(producer)
-    if replace_mode:
-        # Replace-string mode SUBSTITUTES each input RECORD into every occurrence of
-        # the (dequoted) replace token, one command per record. A non-static
-        # producer leaves the template unresolved -> classify as-is (base parity).
-        if produced is None:
-            return [" ".join(command)]
-        return _xargs_replace_commands(command, replace_token, _xargs_output_words(produced))
-    # Append mode: xargs appends the producer OUTPUT after the command's argv.
-    if produced is None:
-        return []
-    return [" ".join(command + _xargs_output_words(produced))]
-
-
-#: Where a static producer's stdout splits into xargs input records: whitespace, a
-#: real NUL, or printf's NUL escape (``\0`` / ``\00`` / ``\000``), which the escape
-#: decoder deliberately leaves encoded. ``printf '%s\0' "$HOME" | xargs -0 rm -rf``
-#: hands rm the bare ``$HOME``, not ``$HOME\0`` (GPT 6.1).
-_XARGS_RECORD_SPLIT_RE = re.compile(r"(?:\\0{1,3}(?![0-7])|\x00|\s)+")
-
-
-def _xargs_output_words(produced: str) -> "list[str]":
-    """The input records ``xargs`` reads from a static producer's stdout, each
-    spelled so a re-split of the rebuilt command reads it back as ONE literal word:
-    a record carrying shell punctuation (``a;b``) is double-quoted, so its ``;`` is
-    data and the record after it still reaches the command (GPT 6.1). A plain record
-    (``$home``, ``~``, ``./build``) is left bare so its home spelling stays live."""
-    return [_xargs_literal_word(w) for w in _XARGS_RECORD_SPLIT_RE.split(produced) if w]
-
-
-_XARGS_SHELL_PUNCT = frozenset(";&|<>()`'\"\\ \t\n#*?[]{}")
-
-
-def _xargs_literal_word(word: str) -> str:
-    if not any(c in _XARGS_SHELL_PUNCT for c in word):
-        return word
-    escaped = "".join("\\" + c if c in '"\\`' else c for c in word)
-    return f'"{escaped}"'
-
-
-#: Ceiling on (records x command words) when ``xargs -I`` expands one command per
-#: record. Past it the rebuild falls back to ONE command with every record
-#: appended -- the conservative base shape, which still names every record.
-_XARGS_REPLACE_EXPANSION_CAP = 4096
-
-
-def _xargs_replace_commands(
-    command: "list[str]", replace_token: str, records: "list[str]"
-) -> "list[str]":
-    """One rebuilt command per distinct input record, the replace token substituted."""
-    unique = list(dict.fromkeys(r for r in records if r))
-    if not unique:
-        return [" ".join(command)]
-    if len(unique) * max(len(command), 1) > _XARGS_REPLACE_EXPANSION_CAP:
-        return [" ".join(command + unique)]
-    return [" ".join(tok.replace(replace_token, rec) for tok in command) for rec in unique]
-
-
-def _xargs_reconstructed_command_with_flags(tokens: "list[str]") -> "list[str]":
-    """Like :func:`_xargs_reconstructed_command` but PRESERVES the invoked
-    command's own flags, returning ONE rebuilt command per executed xargs pipeline.
-
-    ``xargs rm -fr`` runs ``rm -fr``, a recursive-force wipe; the flag-stripping
-    form produces a bare ``rm`` the rm-floor does not recognise as destructive, so a
-    home wipe through xargs fails open with it (GPT 6.1 security-class). The rm-floor
-    classifies each result with ``_rm_targets_in_argv`` (which treats a
-    ``/``-descendant operand as allowed), so unlike the stripping form this is NOT
-    fed to the greedy whole-line ``rm -rf /.*`` regex -- keeping ``echo /tmp/x |
-    xargs rm -rf`` allowed at base parity while ``echo ~ | xargs rm -fr`` denies.
-
-    EVERY executed xargs pipeline on the line is rebuilt (GPT 6.1 F1), the producer
-    output is resolved to its STATIC stdout and substituted/appended as literal argv
-    words, and the invoked command's tokens are shell-dequoted before
-    classification (GPT 6.1 F2) -- all in the shared :func:`_reconstruct_one_xargs`.
-    """
-    out: "list[str]" = []
-    for pipe, xargs_at in _xargs_pipelines(tokens):
-        out.extend(r for r in _reconstruct_one_xargs(tokens, pipe, xargs_at, keep_flags=True) if r)
-    return out
+        return ""
+    return " ".join(command + piped)
 
 
 _PRINTF_ESCAPES = (("\\n", " "), ("\\t", " "), ("\\r", " "), ("\\v", " "), ("\\f", " "))
@@ -2938,13 +2419,7 @@ def _matching_close_paren(text: str, open_end: int) -> "tuple[int, bool]":
     """
     depth = 1
     cases = 0
-    # A substitution BODY is parsed in a FRESH quote context, whatever quoting
-    # surrounds the opener: in ``echo "$(rm -rf "$HOME")"`` the inner quotes are
-    # the body's own, so walking quote state from the start of the whole text
-    # left the body "inside" the outer double quote, read the real ``)`` as quoted
-    # data and never closed the span (GPT 6.1). The walk therefore starts at the
-    # body, unquoted.
-    pos = open_end
+    pos = 0
     state = 0
     ansi = False
     while pos <= len(text):
@@ -4006,9 +3481,10 @@ def _nested_shell_payloads(
         # ``xargs`` is different in shape: it does not read a whole script, it APPENDS
         # the piped words to its own command.  ``echo <verb> | xargs <name>`` therefore
         # runs ``<name> <verb>`` even though neither half contains a space.  Reconstruct
-        # what EACH executed xargs pipeline will run (GPT 6.1 F1): its command line plus
-        # the producer's resolved output.
-        payloads.extend(_xargs_reconstructed_command(tokens))
+        # what it will run: the xargs command line plus the producer's literal words.
+        reconstructed = _xargs_reconstructed_command(tokens)
+        if reconstructed:
+            payloads.append(reconstructed)
     return [p for p in payloads if p.strip()]
 
 
@@ -4098,13 +3574,8 @@ _SHELL_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)$", re.DOTALL
 # vanish (e.g. g""it -> git, ca''t -> cat).
 _EMPTY_QUOTE_RE = re.compile(r'""|\'\'')
 
-# Regex for $HOME or ${HOME} variable expansion. The bare ``$HOME`` form
-# requires a variable-name boundary after ``HOME`` (a following ``[A-Za-z0-9_]``
-# would make it a DIFFERENT variable), so ``$HOME_BACKUP`` is not mis-expanded to
-# the home path plus ``_BACKUP`` — which otherwise makes an unrelated variable
-# look like a home-directory target (issue review finding). ``${HOME}`` is
-# already delimited by its braces.
-_HOME_VAR_RE = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", re.IGNORECASE)
+# Regex for $HOME or ${HOME} variable expansion.
+_HOME_VAR_RE = re.compile(r"\$\{HOME\}|\$HOME", re.IGNORECASE)
 
 # ANSI-C (``$'…'``) and locale (``$"…"``) quoting.  Both are QUOTING forms whose
 # value the shell computes before the program sees it, so they are resolved as part

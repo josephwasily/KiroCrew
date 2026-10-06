@@ -27,16 +27,13 @@ from .shell_normalizer import (
     _data_consumer_command_disqualified,
     _data_consumer_exempt,
     _decode_shell_quoted_literals,
-    _ends_argv,
     _iter_shell_chars,
     _opens_comment,
     _program_basename,
     _shell_payload_walk,
     _ShellChar,
     _split_shell_words,
-    _strip_outer_quotes,
     _substitution_bodies,
-    _substitution_depth_delta,
 )
 
 # ── Recursive-force ``rm`` deletion floor ──
@@ -46,13 +43,13 @@ from .shell_normalizer import (
 # sound closure is argv-STRUCTURAL and EXACT: read the ``rm``'s OWN argv, deny only
 # when a resolved operand IS root or home itself. UNION with the two catalog
 # regexes (kept LIVE). Tokens RAW/ENV-UNEXPANDED, so home is by spelling (expanding
-# reads ``$HOME`` as ROOT — GPT + Opus). PROGRAM ``rm`` only.
+# reads ``$HOME`` as ROOT). PROGRAM ``rm`` only.
 
 
 #: ``rm``'s long options, so an abbreviation can be tested for ambiguity. GNU
 #: ``getopt_long`` accepts any UNAMBIGUOUS prefix, so ``rm --rec …`` / ``rm --for
-#: …`` run the identical recursive/force delete a fixed string compare would miss
-#: (GPT). A prefix is honoured only when it matches exactly ONE option — ``--r`` ->
+#: …`` run the identical recursive/force delete a fixed string compare would miss.
+#: A prefix is honoured only when it matches exactly ONE option — ``--r`` ->
 #: ``--recursive``, ``--f`` -> ``--force`` — never a prefix shared by two.
 _RM_LONG_OPTIONS: tuple[str, ...] = (
     "--recursive",
@@ -91,8 +88,8 @@ def _rm_long_option_resolves_to(tok: str, target: str) -> bool:
 #: The cluster must consist ONLY of rm's real short-option letters (``r f i v d``;
 #: ``R``/``I`` fold to ``r``/``i`` in the lowercased view) -- otherwise a FOREIGN
 #: single-dash predicate that merely contains ``r`` (find's ``-newer``, ``-regex``,
-#: a flattened substitution body) was misread as recursive and failed a legit
-#: ``rm -f $(find ~ -newer …)`` closed (Security Scope).
+#: a flattened substitution body) is not misread as recursive, so a legit
+#: ``rm -f $(find ~ -newer …)`` stays allowed.
 def _rm_is_recursive_flag(tok: str) -> bool:
     if tok.startswith("--"):
         return _rm_long_option_resolves_to(tok, "--recursive")
@@ -107,15 +104,90 @@ def _rm_is_force_flag(tok: str) -> bool:
     return bool(re.fullmatch(r"-[rfivd]*f[rfivd]*", tok))
 
 
+def _rm_ends_argv_structural(token: str) -> bool:
+    """``_ends_argv``'s STRUCTURAL boundaries only -- a ``#`` comment or a bare
+    ``(`` / ``{`` / ``x()`` function-body opener -- WITHOUT its quote-unaware
+    ``";"/"|" in token`` substring test.
+
+    The flag precheck already finds an unquoted control operator with the
+    quote-aware :func:`_rm_unescaped_boundary`, so the only extra boundary this
+    fallback must add is a structural opener. Delegating to ``_ends_argv`` instead
+    re-introduced the quote-unaware test, which broke the span at a QUOTED ``;``
+    (``rm 'a;b' -fr $HOME``) before the recursive-force flag and failed open.
+    A real structural opener never appears inside a quoted
+    operand, so this stays safe where ``_ends_argv`` did not.
+    """
+    if token.startswith("#"):
+        return True
+    return token.rstrip("{") in {"", "("} or token.rstrip("{").endswith("()")
+
+
+def _rm_token_ends_argv(token: str) -> bool:
+    """The ONE quote-aware command-boundary test for every rm-floor scan and
+    fallback. A token ends the current ``rm`` argv when it carries an UNQUOTED
+    control operator (``;`` / ``&`` / ``|`` / newline / ``)``), via the quote-aware
+    :func:`_rm_unescaped_boundary`, OR is a structural opener (``#`` comment, bare
+    ``(`` / ``{`` / ``x()``), via :func:`_rm_ends_argv_structural`.
+
+    ``shell_normalizer._ends_argv`` tests ``";"/"|" in token`` as a raw SUBSTRING,
+    so a QUOTED ``'a;b'`` operand ended the scan before a later home/root target and
+    failed open -- the same quote-boundary bug fixed at three sites. Routing every
+    boundary test through this helper closes it everywhere at once."""
+    return _rm_unescaped_boundary(token) is not None or _rm_ends_argv_structural(token)
+
+
+def _rm_substitution_depth_delta(token: str) -> int:
+    """Quote-aware net change in command-substitution nesting for *token*.
+
+    Like ``shell_normalizer._substitution_depth_delta`` but counts a ``$(`` /
+    backtick / ``)`` ONLY where it is UNQUOTED, so a literal paren inside a quoted
+    operand (``'a)b'``) does not look like a substitution closer and end the ``rm``
+    argv scan before a later target (GPT 6.1: ``rm -fr 'a)b' ~`` was allowed because
+    the quoted ``)`` dropped the span depth below zero). The shared helper counts
+    raw characters and its own docstring notes it cannot tell a quoted paren apart;
+    this one walks the token's quote state. Mirrors the shared formula
+    ``count("$(") + count("`")//2 - count(")")`` over UNQUOTED characters only."""
+    dollar_paren = backtick = close_paren = 0
+    i = 0
+    n = len(token)
+    in_single = in_double = False
+    while i < n:
+        ch = token[i]
+        if ch == "\\" and not in_single and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+        if in_single or in_double:
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n and token[i + 1] == "(":
+            dollar_paren += 1
+            i += 2
+            continue
+        if ch == "`":
+            backtick += 1
+        elif ch == ")":
+            close_paren += 1
+        i += 1
+    return dollar_paren + backtick // 2 - close_paren
+
+
 def _rm_span_is_recursive_force(tokens: "list[str]", rm_index: int) -> bool:
     """Cheap pre-check: does the ``rm`` span starting after *rm_index* carry a
     RECURSIVE and a FORCE flag (any spelling/order), or ``--no-preserve-root``?
 
     Only such a span can be a catastrophic wipe AND is the shape whose per-span
-    suffix re-scan is expensive, so the per-argv span cap (GPT 6.1 F2) counts only
+    suffix re-scan is expensive, so the per-argv span cap counts only
     these — a long chain of benign ``rm <file>`` commands (no ``-rf``) neither
-    charges the budget nor is failed-closed past it (Security Scope false
-    positive). Scans only this one span's flag words (until the next command
+    charges the budget nor is failed-closed past it.
+    Scans only this one span's flag words (until the next command
     boundary); flags are tested on the de-quoted spelling bash acts on, matching
     the structural parse below. Does not resolve brace expansion — a brace-grouped
     flag word is a catastrophic candidate, so an unparsed brace token conservatively
@@ -129,16 +201,23 @@ def _rm_span_is_recursive_force(tokens: "list[str]", rm_index: int) -> bool:
         glued_prefix = ""
         # A GLUED separator (``-fr;`` / ``-fr&&``) carries the flag BEFORE the
         # operator; classify that prefix, then stop -- otherwise ``rm ~ -fr; true``
-        # breaks before the recursive-force flag is seen and the wipe fails open
-        # (GPT 6.1 F1). ``_rm_unescaped_boundary`` finds ``;`` / ``&`` / ``|`` glued
-        # mid-token, which ``_ends_argv`` misses for a glued ``&&``.
+        # breaks before the recursive-force flag is seen and the wipe fails open.
+        # ``_rm_unescaped_boundary`` finds an UNQUOTED ``;`` / ``&`` /
+        # ``|`` glued mid-token (quote-aware), which ``_ends_argv`` misses for a
+        # glued ``&&``. Both boundary tests must be quote-aware: ``_ends_argv``'s
+        # ``";"/"|" in token`` substring test fires on a QUOTED separator (``'a;b'``)
+        # and breaks the span before a later ``-fr`` + ``$HOME``, failing open.
+        # ``_rm_unescaped_boundary`` already covers the operators quote-aware,
+        # so the fallback here is only ``_ends_argv``'s STRUCTURAL openers (a ``#``
+        # comment, a bare ``(`` / ``{`` / ``x()`` function body) -- none of which a
+        # quoted operand produces.
         bidx = _rm_unescaped_boundary(raw)
         if bidx is not None:
             if bidx > 0:
                 glued_prefix = raw[:bidx]
             if not glued_prefix:
                 break
-        elif _ends_argv(raw):
+        elif _rm_ends_argv_structural(raw):
             break
         tok = _rm_strip_all_quotes(glued_prefix or raw)
         if tok == "--":
@@ -165,19 +244,20 @@ def _rm_span_is_recursive_force(tokens: "list[str]", rm_index: int) -> bool:
 #: trailing slash, NOTHING under it. For an ``rm`` reached through an EXEC WRAPPER
 #: (``setsid rm -rf /``, ``sudo …``): base caught a wrapper-reached descendant only
 #: incidentally, so denying those newly refuses benign work (``docker exec kc-ci rm
-#: -fr /tmp/build-cache`` — base ALLOWED it; Security Scope). Wrapper denies root
-#: ITSELF only.
-_RM_ROOT_ITSELF_RE = re.compile(r"/+(?:\*/*)?")
+#: -fr /tmp/build-cache`` — base ALLOWED it). Wrapper denies root
+#: ITSELF only. The child glob accepts a RUN of stars (``/**`` / ``/***``), which
+#: bash expands over the same children as ``/*`` (GPT 6.1).
+_RM_ROOT_ITSELF_RE = re.compile(r"/+(?:\*+/*)?")
 #: The HOME dir ITSELF — ``~`` / ``$HOME`` / ``${HOME}``, bare or with trailing
 #: slashes (``~//``) or the ``~/*`` glob. The ``${home}`` form also admits a
-#: slash-only suffix removal (``${HOME%/}``), the ``:?`` check (``${HOME:?msg}``,
-#: GPT 5.6 F1 UPHOLD-FENCED), the identity substring ``${HOME:0}`` (GPT 6.1), and a
+#: slash-only suffix removal (``${HOME%/}``), the ``:?`` check (``${HOME:?msg}``),
+#: the identity substring ``${HOME:0}``, and a
 #: DEFAULT-VALUE form ``${HOME:-x}`` / ``${HOME:=x}`` / ``${HOME-x}`` / ``${HOME=x}``
 #: — HOME is always set, so the default never fires and the shell supplies the real
-#: home (GPT 6.1 F2). Other value-CHANGING operators (``:+``, non-zero substring)
+#: home. Other value-CHANGING operators (``:+``, non-zero substring)
 #: stay out. Wrapper only.
 _RM_HOME_ITSELF_RE = re.compile(
-    r"(?:~|\$\{home(?:%%?/*|:\?[^}]*|:[ \t]*0+[ \t]*|:?[-=][^}]*)?\}|\$home(?![a-z0-9_]))(?:/+(?:\*/*)?)?",
+    r"(?:~|\$\{home(?:%%?/*|:\?[^}]*|:[ \t]*0+[ \t]*|:?[-=][^}]*)?\}|\$home(?![a-z0-9_]))(?:/+(?:\*+/*)?)?",
     re.IGNORECASE,
 )
 #: Escape / quote / substitution characters that can reconstruct the ``rm``
@@ -196,30 +276,60 @@ _RM_BRACE_RANGE_RE = re.compile(
 
 #: Ceiling on nested-frame descents per classification. Each ``find -exec`` /
 #: ``sh -c`` / interpreter span recurses into :func:`_rm_targets_in_argv`, so a
-#: crafted nest would fan out and hang the gate (Opus). A mutable cell decremented
+#: crafted nest would fan out and hang the gate. A mutable cell decremented
 #: per descent; at zero no span opens, so work is linear. Fails SAFE: a real
 #: ``rm`` at any reachable depth is classified before the cap bites.
 _RM_DESCENT_BUDGET = 64
 
 #: How many ``rm`` command spans one argv classifies before it stops. Each
 #: leading ``rm`` re-scans its operand suffix, so an argv padded with thousands of
-#: ``rm`` words is quadratic (measured 44 s, past the 25 s gate deadline; GPT 6.1
-#: F2). A real command has a handful, so this never trims a legitimate one; past
+#: ``rm`` words is quadratic (measured 44 s, past the 25 s gate deadline).
+#: A real command has a handful, so this never trims a legitimate one; past
 #: it the scan FAILS CLOSED (returns both targets) because the whole-text net
 #: catches only the contiguous spelling.
 _RM_CLASSIFY_SPAN_CAP = 64
 
+#: Ceiling on how many operands ONE ``rm`` span's structural pass classifies. The
+#: pass runs several O(operands) candidate scans, so a single span with hundreds of
+#: operands (a bare-``rm`` flood) is linear per scan and stalls the gate under
+#: coverage instrumentation. Past this the cheap per-span root/home-shape verdict is
+#: used instead -- it reads the operands once with no candidate machinery. Set well
+#: above any real recursive-force ``rm`` (a handful of targets); only a flood hits it.
+_RM_SPAN_OPERAND_CAP = 128
+
+#: Shared ceiling on tokens classified across all frames PAST the frame budget. A
+#: deep nested wipe (few tokens per frame) is still reached; a wide flood of long
+#: suffix frames stops once spent. Bounds the past-budget flat scan to O(1) total.
+_RM_FLAT_TOKEN_BUDGET = 4096
+
+#: Cumulative byte ceiling on brace members materialized across ALL ``rm`` spans
+#: of one argv. The per-WORD ``_BRACE_EXPANSION_CAP`` bounds the member COUNT of a
+#: single word and ``_RM_CLASSIFY_SPAN_CAP`` bounds how many spans are classified,
+#: but neither bounds the BYTES a word's members carry: a word AT the count cap
+#: whose members are each large (``"a"*16000 + "{a,b}"*8`` -> 256 members x ~16 KB)
+#: re-materialized once per span still costs ~116 CPU s across 64 spans, past the
+#: 25 s gate watchdog. Bound the total expanded bytes BEFORE
+#: materialization; once exhausted a span stops expanding and falls back to the
+#: CHEAP per-span root/home-shape verdict (``span_overflow_targets``), already
+#: proven not to newly refuse a legitimate descendant cleanup.
+_RM_EXPANSION_BYTE_BUDGET = 1_000_000
+
 #: Max substitution openers (``$(`` / backtick) the structural walk runs on. Each
-#: seeds a frame, so a chain (``"$( " * 1000``) makes the walk O(openers²) and runs
-#: for minutes (Opus perf). Beyond this the expensive descent is skipped but the
-#: top-level per-command argv is still classified, so a wipe outside the openers is
-#: caught — fail CLOSED, never open (GPT 6.1 F2).
-_RM_SUBSTITUTION_OPENER_CAP = 200
+#: seeds a frame, so a chain (``"$(true" * 199``) makes the eager frame walk
+#: O(openers²) and ran ~24s on the gate -- past the 25s loop-stall watchdog. Beyond
+#: this the expensive recursive descent is skipped: the heavy path classifies the
+#: top-level per-command argv AND does ONE bounded level of descent into the trailing
+#: unbalanced ``$(`` (``_rm_last_unbalanced_substitution_tail``), so an ``rm`` wipe
+#: hidden after a long opener run is still caught -- so the lower cap stays fail
+#: closed. Set below any real command's substitution count (a few dozen); deeper
+#: nesting past the one descent level is a residual left to the whole-text regex net
+#: and the sandbox.
+_RM_SUBSTITUTION_OPENER_CAP = 48
 
 # Innermost ``$(...)`` or backtick body -- a span containing NO further opener, so
 # a flat regex sees it without the quote-aware paren walk (which a dense
 # ``"$(true)"`` run defeats, leaving the real ``$(rm -fr ~)`` unparsed and a home
-# wipe failing open -- GPT 6.1 security-class). Peeling innermost spans repeatedly
+# wipe failing open). Peeling innermost spans repeatedly
 # reaches nested ones too, under a bounded budget.
 _RM_INNERMOST_SUBST_RE = re.compile(r"\$\(([^()`]*)\)|`([^`]*)`")
 
@@ -227,10 +337,55 @@ _RM_INNERMOST_SUBST_RE = re.compile(r"\$\(([^()`]*)\)|`([^`]*)`")
 # recursive frame walk (whose cost is O(openers²), hence the small
 # ``_RM_DESCENT_BUDGET``), this scan is a single linear ``finditer`` + a cheap argv
 # check per body, so the cap can be generous: the real wipe can sit past hundreds
-# of decoy ``"$(true)"`` spans (GPT 6.1 put it at index 201). The cap only bounds a
+# of decoy ``"$(true)"`` spans. The cap only bounds a
 # truly pathological input; a wipe past it is still caught by the fail-closed
 # whole-text regex.
 _RM_SUBST_BODY_SCAN_CAP = 20000
+
+
+def _rm_last_unbalanced_substitution_tail(text: str) -> "str | None":
+    """The text after the LAST ``$(`` opener that is never closed, or ``None``.
+
+    A dense run of unbalanced ``$(`` openers (``echo "$(true" * 199 rm -fr ~``)
+    opens nested command substitutions bash runs the trailing command inside; the
+    innermost-body regex matches only BALANCED ``$(…)`` and so misses it. This finds
+    the deepest still-open ``$(`` by a single left-to-right paren-depth pass
+    (single-quoted spans are skipped, since ``$(`` is literal there) and returns the
+    tail from just after it, so the caller can classify that tail as ONE command.
+    One level only, O(len(text)); deeper nesting is a residual left to the whole-text
+    regex net and the sandbox."""
+    depth = 0
+    stack: "list[int]" = []
+    i = 0
+    n = len(text)
+    in_single = False
+    while i < n:
+        ch = text[i]
+        if ch == "'" and not in_single:
+            in_single = True
+            i += 1
+            continue
+        if ch == "'" and in_single:
+            in_single = False
+            i += 1
+            continue
+        if in_single:
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n and text[i + 1] == "(":
+            depth += 1
+            stack.append(i + 2)
+            i += 2
+            continue
+        if ch == ")" and depth > 0:
+            depth -= 1
+            stack.pop()
+            i += 1
+            continue
+        i += 1
+    if not stack:
+        return None
+    return text[stack[-1] :]
 
 
 def _rm_operand_before_boundary(operand: str) -> "tuple[str, bool]":
@@ -249,34 +404,94 @@ def _rm_operand_before_boundary(operand: str) -> "tuple[str, bool]":
     return operand[:match], True
 
 
-def _rm_unescaped_boundary(operand: str) -> "int | None":
-    """Index of the first NOT-backslash-escaped control-operator (``;`` / ``&`` /
-    ``|`` / newline), or ``None``.
+def _rm_amp_is_redirection(text: str, idx: int) -> bool:
+    """True if the ``&`` at *idx* is part of a REDIRECTION, not a command separator.
 
-    ``_split_shell_words`` keeps a source backslash, so ``rm -rf a\\;b /*`` reaches
-    here as one operand ``a\\;b`` whose ``;`` is an ESCAPED literal (file ``a;b``),
-    not a separator — splitting there would end the argv before ``/*`` and fail
-    open (Opus security-class). A boundary preceded by an odd run of backslashes is
-    literal and skipped.
+    Bash's ``&`` backgrounds / separates a command, but inside a redirection it
+    duplicates a file descriptor and does NOT end the command:
+
+    * ``N>&M`` / ``N<&M`` (``2>&1``, ``1>&2``, ``<&3``) -- the ``&`` follows a
+      ``>`` / ``<`` (after an optional fd digit), so the char immediately before it
+      is ``>`` or ``<``.
+    * ``&>`` / ``&>>`` (``&>/dev/null``) -- the ``&`` is immediately followed by
+      ``>``.
+
+    Treating such an ``&`` as a separator split ``rm -fr 2>&1 ~`` at the ``&`` and
+    dropped the trailing ``~`` home operand (GPT 6.1, security-class). A real
+    backgrounding ``&`` (``rm -fr x & rm -fr ~``) has neither neighbour and still
+    ends the command. The ``&&`` AND-operator is a separator too and is not a
+    redirection: its neighbour is another ``&``, not ``>`` / ``<``.
+
+    The other redirection forms the shell writes -- ``>``, ``>>``, ``<``, ``<<``,
+    ``2>``, ``1>`` -- contain no ``;`` / ``&`` / ``|`` character, so they never look
+    like a separator to the single boundary scan and need no special case here; only
+    the fd-duplicating ``&`` is ambiguous.
     """
+    prev_ch = text[idx - 1] if idx > 0 else ""
+    next_ch = text[idx + 1] if idx + 1 < len(text) else ""
+    return prev_ch in (">", "<") or next_ch == ">"
+
+
+def _rm_unescaped_boundary(operand: str, *, treat_subshell_closer: bool = True) -> "int | None":
+    """Index of the first command SEPARATOR in *operand* that is neither
+    backslash-escaped, quoted, nor part of a redirection, or ``None``.
+
+    This is the SINGLE command-boundary scan for the whole floor. Every caller --
+    the span-ender :func:`_rm_token_ends_argv`, the recursive-force flag precheck,
+    the operand-before-boundary split, the operand-loop terminator, and the
+    glued-token splitter -- routes through it so one definition of "where does this
+    command end" is applied everywhere. A second helper (the former
+    ``_rm_boundary_outside_quotes``) drifted from this one and split ``2>&1`` at the
+    ``&`` where this one would too; merging them means a redirection-``&`` fix (or
+    any future boundary rule) lands once and holds at every scan.
+
+    Boundaries recognised: ``;`` ``&`` ``|`` newline, plus the bare-subshell closer
+    ``)`` when *treat_subshell_closer* is True. NOT boundaries:
+
+    * a backslash-escaped operator (``a\\;b`` is the file ``a;b``) -- the escape and
+      its target are both skipped;
+    * an operator INSIDE a quoted span (``'a;b'`` / ``"a;b"`` is a literal filename),
+      so splitting there cannot end the argv before a later recursive-force flag and
+      a home/root operand (``rm 'a;b' -fr $HOME``);
+    * a redirection ``&`` (``2>&1``, ``1>&2``, ``&>/dev/null``, ``>&2``), which
+      duplicates a file descriptor rather than ending the command (``rm -fr 2>&1 ~``
+      must keep ``~``), via :func:`_rm_amp_is_redirection`.
+
+    *treat_subshell_closer* is the ONLY behavioural knob, for the one caller that
+    must not treat ``)`` as a boundary: the glued-token splitter leaves a ``)``
+    closing a ``$(…)`` to the depth-tracking classifier. ``)`` closes a bare subshell
+    for the default callers (``(rm -fr /)`` arrives as the operand ``/)`` whose
+    target is ``/``; splitting there classifies ``/`` and ends the argv so a widened
+    ``-fr`` in a bare subshell cannot hide root). ``}`` is NEVER a boundary -- it
+    closes a ``${HOME}`` expansion far more often than a bare group, and treating it
+    as one truncated ``${HOME}/../x`` at the brace.
+    """
+    separators = ";&|\n)" if treat_subshell_closer else ";&|\n"
     k = 0
     n = len(operand)
+    quote = ""  # "'" or '"' while inside that quote span, else ""
     while k < n:
         ch = operand[k]
         if ch == "\\":
             k += 2  # the backslash escapes the next char; neither is a boundary
             continue
-        if ch in ";&|\n)":
-            # ``)`` closes a bare subshell: ``(rm -fr /)`` reaches here as the operand
-            # ``/)`` whose target is ``/`` -- splitting at the closer classifies ``/``
-            # and ends the argv so the ``-fr`` widened spelling in a bare subshell
-            # cannot hide the root (Opus 5.5). The caller only invokes this for a
-            # glued boundary when depth <= 0, so a ``)`` closing a ``$(…)`` that HOLDS
-            # the rm (``ls $(rm -rf ./build) ~``) is handled by the depth tracking
-            # instead and never reaches here. ``}`` is NOT a boundary: it closes a
-            # ``${HOME}`` parameter expansion far more often than a bare group, and
-            # treating it as one truncated ``${HOME}/../x`` at the brace (regressing a
-            # real home-parent traversal).
+        if quote:
+            # Inside a quoted span: only the matching close quote ends it; a
+            # control-operator here is literal data, never a boundary.
+            if ch == quote:
+                quote = ""
+            k += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            k += 1
+            continue
+        if ch in separators:
+            # A redirection ``&`` (``2>&1``, ``&>/dev/null``) duplicates a file
+            # descriptor and does NOT end the command, so it is not a boundary.
+            if ch == "&" and _rm_amp_is_redirection(operand, k):
+                k += 1
+                continue
             return k
         k += 1
     return None
@@ -289,8 +504,8 @@ def _rm_strip_all_quotes(token: str) -> str:
     ``$HOME/`` are the SAME path, as are ``"${HOME}"/x`` and ``${HOME}/x`` and a
     split ``"$HO"ME``. ``_strip_outer_quotes`` only peels a BALANCED
     surrounding pair, so a PARTIALLY quoted operand keeps a leading ``"`` that
-    defeats the ``~`` / ``$HOME`` anchor of the home/root matchers (GPT
-    security-class: ``setsid rm -fr "$HOME"/`` bypassed the enabled home rule).
+    defeats the ``~`` / ``$HOME`` anchor of the home/root matchers (e.g.
+    ``setsid rm -fr "$HOME"/`` bypassed the enabled home rule).
     This yields the de-quoted spelling the matchers are anchored on; a backslash
     escape keeps the quote it escapes (``\\"`` is a literal quote char in the
     filename, not a quoting delimiter).
@@ -310,6 +525,69 @@ def _rm_strip_all_quotes(token: str) -> str:
         out.append(ch)
         i += 1
     return "".join(out)
+
+
+def _rm_token_is_flag_word(token: str) -> bool:
+    """True if *token* is an OPTION word (``-rf``, ``--force``, ``--``), not an
+    operand. A flag starts with ``-`` on its de-quoted spelling (``-f$'r'`` ->
+    ``-fr``); an operand that merely CONTAINS a dash (``./a-b``, ``-``) is not one.
+    """
+    stripped = _rm_strip_all_quotes(token)
+    return len(stripped) >= 2 and stripped[0] == "-"
+
+
+def _rm_decoded_argv_preserving_operands(
+    raw_tokens: "list[str]", norm_tokens: "list[str]"
+) -> "list[str]":
+    """Merge the quote-preserving *raw_tokens* with the decoded *norm_tokens* so a
+    PROGRAM or FLAG word carries its decoded spelling while an OPERAND keeps its
+    literal, quote-preserving source.
+
+    The decoded view (the payload walk's own tokens) resolves ``r''m`` -> ``rm`` and
+    a split flag ``-f$'r'`` -> ``-fr``, which the classifier needs. But it also
+    strips an OPERAND's surrounding quotes, so a literal ``'a;b'`` filename collapses
+    to ``a;b`` and the one quote-aware command-boundary split then reads the ``;`` as
+    a boundary, drops the trailing ``~``, and fails a home wipe open. Decoding only
+    the program and flag words — operands kept literal — routes every scan through
+    the single quote-aware boundary helper with operand punctuation intact.
+
+    The two lists are positionally aligned (both come from the same word split; the
+    decode changes a word's CONTENT, not the word COUNT), so when their lengths
+    differ we cannot map safely and fall back to the decoded view unchanged. An
+    operand's own ANSI-C / env decode (``$'\\u002f'`` -> ``/``) is recovered by the
+    walk's separate repaired frame and the raw ``strip_quotes=True`` pass, and the
+    root/home matchers read ``$HOME`` / ``~`` by spelling, so keeping an operand raw
+    loses no coverage.
+    """
+    if len(raw_tokens) != len(norm_tokens):
+        return norm_tokens
+    merged: "list[str]" = []
+    expect_program = True
+    for raw, norm in zip(raw_tokens, norm_tokens):
+        is_program = expect_program and bool(raw)
+        if is_program:
+            expect_program = False
+        # Keep the decoded spelling for the program word and for flag words; an
+        # operand keeps its literal, quote-preserving raw form.
+        merged.append(norm if (is_program or _rm_token_is_flag_word(raw)) else raw)
+        # A glued or standalone command boundary resets the program expectation so
+        # the NEXT command's program word is decoded too (``echo hi; r''m -fr ~``).
+        if _rm_token_ends_argv(raw) or raw.endswith("&"):
+            expect_program = True
+    return merged
+
+
+def _strip_outer_quotes(token: str) -> str:
+    """Remove only a MATCHING pair of surrounding quotes, keeping interior chars.
+
+    Unlike :func:`_rm_strip_all_quotes` (which collapses ALL quotes and
+    backslashes), this peels only a balanced surrounding ``'...'`` / ``"..."`` pair
+    and preserves interior characters. ``'~'`` -> ``~``, ``"$HOME"`` -> ``$HOME``.
+    """
+    t = token
+    while len(t) >= 2 and t[0] == t[-1] and t[0] in ("'", '"'):
+        t = t[1:-1]
+    return t
 
 
 def _rm_operand_is_single_quoted(token: str) -> bool:
@@ -353,6 +631,17 @@ def _rm_brace_word_could_be_catastrophic(word: str) -> bool:
     )
     if not frame_is_root_or_empty:
         return False
+    # When the LITERAL frame is empty, a member equals the concatenation of one
+    # chosen alternative per group. A numeric/char RANGE group (``{000..511}``,
+    # ``{a..z}``) ALWAYS contributes a non-empty digit/letter, so every member
+    # carries that prefix and can be neither empty nor ``/``/``~`` -- a word whose
+    # only non-range group is an empty-alternative suffix (``{000..511}{,.log}``)
+    # expands solely to relative descendants (``000``, ``000.log`` …) and is NOT
+    # catastrophic (a bulk numbered cleanup must stay allowed).
+    if not stripped and any(
+        _RM_BRACE_RANGE_RE.match(g.group()[1:-1]) for g in _RM_BRACE_GROUP_RE.finditer(word)
+    ):
+        return False
     # The frame could reach root/home — a group must OFFER a completing member.
     for group in _RM_BRACE_GROUP_RE.finditer(word):
         body = group.group()[1:-1]
@@ -374,12 +663,25 @@ def _rm_normalize_dot_segments(operand: str) -> str:
 
     The kernel resolves dot segments, so ``/./`` / ``/tmp/../`` are ROOT and
     ``~/./`` is home — yet the exact matchers see a non-``/`` string and miss it
-    (GPT: ``setsid rm -fr /./`` bypassed the wrapped-root guard). Resolves like
+    (e.g. ``setsid rm -fr /./`` bypassed the wrapped-root guard). Resolves like
     ``os.path.normpath`` WITHOUT filesystem access, preserving a leading ``~`` /
     ``$HOME`` marker and a trailing ``*`` glob so the matchers still fire.
     """
     if "." not in operand:
         return operand
+    # The payload walk expands ``$HOME`` with no variable-name boundary (shared
+    # ``main`` behavior), so ``$HOME_BAK`` / ``$HOMEDIR`` become the real home dir
+    # with a GLUED identifier suffix (``$HOME`` + ``_bak``). That names a DIFFERENT
+    # variable's target, not the home dir, yet a trailing ``..`` would then collapse
+    # the fabricated ``<home>_bak/../..`` to ``/`` and the root matcher would
+    # falsely refuse it (base allowed it). When the operand is the real home path
+    # followed by an identifier char (NOT a ``/`` separator), leave it unresolved so
+    # no dot-traversal escapes it to root/home.
+    _home_real = _rm_expanded_home_path()
+    if _home_real and operand.lower().startswith(_home_real):
+        _after = operand[len(_home_real) : len(_home_real) + 1]
+        if _after and (_after.isalnum() or _after == "_"):
+            return operand
     # Preserve a leading home marker and a trailing ``*`` glob across normpath,
     # which would otherwise mangle ``~`` or drop the glob.
     prefix = ""
@@ -388,7 +690,7 @@ def _rm_normalize_dot_segments(operand: str) -> str:
             # A bare ``$HOME`` variable ends at a non-identifier char: ``$HOME_BAK``
             # and ``$homedir`` are DIFFERENT variables, so the bare ``$home`` marker
             # needs a name boundary -- without it ``rm -fr $HOME_BAK/../..`` resolved
-            # against the real home and was falsely refused (Opus 5.5). ``${home}`` is
+            # against the real home and was falsely refused. ``${home}`` is
             # already brace-delimited (``${HOME}bak`` is home + literal ``bak``), and
             # ``~x`` is a username handled elsewhere -- neither needs the boundary.
             if marker == "$home":
@@ -403,7 +705,7 @@ def _rm_normalize_dot_segments(operand: str) -> str:
         operand, glob_tail = operand[:-1], "*"
     if prefix:
         # A ``..`` after the home marker collapses against HOME, not ``/``:
-        # ``$HOME/../alice`` with ``HOME=/home/alice`` IS home (GPT). Resolve against
+        # ``$HOME/../alice`` with ``HOME=/home/alice`` IS home. Resolve against
         # the REAL expanded home, normalize the joined path (lexical), map back:
         # exactly home -> home; under -> descendant; above -> bare absolute. Fold
         # separators + lowercase (Windows CI); cannot widen POSIX.
@@ -416,7 +718,7 @@ def _rm_normalize_dot_segments(operand: str) -> str:
         # The home MATCHER admits a glob only after a ``/`` separator
         # (``_RM_HOME_ITSELF_RE`` is ``~(?:/+(?:\*/*)?)?``), so a bare ``~*`` /
         # ``~/foo*`` with the separator dropped would never fullmatch and the wipe
-        # would fail open (Opus security-class: ``rm -fr ~/./*`` collapsed to
+        # would fail open (e.g. ``rm -fr ~/./*`` collapsed to
         # ``~*``). Re-emit the ``/`` with the glob tail.
         glob_suffix = "/" + glob_tail if glob_tail else ""
         if collapsed_full == home_real:
@@ -432,7 +734,7 @@ def _rm_normalize_dot_segments(operand: str) -> str:
         collapsed = ""
     # ``~`` tilde-expands ONLY as a word's first char. ``./~`` is a cwd directory
     # literally named ``~`` (not expanded) — base's ``rm -rf ~.*`` never matched its
-    # leading ``./`` (Security Scope). When no home prefix was present yet normpath
+    # leading ``./``. When no home prefix was present yet normpath
     # collapsed a leading ``./`` to a bare ``~`` segment, that ``~`` is a literal
     # filename: restore the dot anchor so it does not re-read as home.
     if not prefix and collapsed[:1] == "~":
@@ -495,7 +797,7 @@ def _rm_walk_frames(text_lower: str, raw_text: "str | None") -> "list[tuple[str,
             frames.extend((source, toks, True) for source, toks in _shell_payload_walk(repaired))
     # Drop a DESCENDED substitution frame whose opener is SINGLE-QUOTED: single
     # quotes suppress expansion, so a backtick / ``$(`` inside them is literal (``git
-    # commit -m 'the `rm -fr /` step'`` is prose; Security Scope). The first frame
+    # commit -m 'the `rm -fr /` step'`` is prose). The first frame
     # (whole command) is always kept; a single-quoted ``-c`` payload (``bash -c 'rm
     # -rf /'``) still executes as a ``-c`` descent, so only a bare body is dropped.
     single = _rm_single_quoted_positions(text_lower)
@@ -547,7 +849,7 @@ def _rm_has_live_home_expansion(text_lower: str) -> bool:
     A QUOTED tilde (``'~'`` / ``"~"``), a backslash-escaped ``\\~``, and a
     SINGLE-quoted ``'$HOME'`` are literal filenames the shell never expands to the
     home dir, so a command whose only home-shaped token is one of those performs
-    NO home expansion — base allowed deleting such a cwd file (Security Scope).
+    NO home expansion — base allowed deleting such a cwd file.
     The caller drops a ``home`` verdict the payload walk produces by expanding a
     quoted tilde regardless of its quoting.
     """
@@ -596,7 +898,7 @@ def _rm_split_unquoted_newlines(source: str) -> "list[str]":
     like ``rm -f x\\nls -ltr ~`` would otherwise fuse ``ls -ltr ~`` into ``rm``'s
     argv — ``ls``'s packed ``-ltr`` donates a spurious ``-r`` and ``~`` becomes
     the operand, misreading a non-recursive ``rm -f`` as a recursive-force home
-    wipe (Security Scope false positive). Splitting on the unquoted newline first
+    wipe. Splitting on the unquoted newline first
     keeps each line its own argv. A newline inside quotes or escaped is literal
     and does not split. Returns the single source unchanged when it has no
     unquoted newline (the common case), so a one-line command is untouched.
@@ -619,7 +921,7 @@ def _rm_split_top_level_semicolons(source: str) -> "list[str]":
     """Split *source* at TOP-LEVEL, unquoted command separators (``;`` / ``&`` /
     ``|``), used only by the heavy-substitution fast path: each segment is
     classified as its own argv so a real ``…; rm -fr ~`` after a flood of
-    ``"$(true)"`` operands is still seen (GPT 6.1 F2). A separator inside quotes,
+    ``"$(true)"`` operands is still seen. A separator inside quotes,
     an escape, or a ``$(…)`` / backtick / ``${…}`` body does not split.
     """
     depth = _rm_substitution_depth(source)
@@ -650,8 +952,8 @@ def _rm_absolute_home_operand(text_lower: str) -> bool:
     real home dir (``rm -fr /home/alice`` where ``$HOME`` is ``/home/alice``).
 
     Such an equality carries NO ``$HOME`` / ``~`` token, so the tilde-liveness
-    suppression would wrongly discard it and allow an irreversible home wipe (GPT
-    6.1 F3, security-class). Uses the SAME separator-folding + home-itself-tail
+    suppression would wrongly discard it and allow an irreversible home wipe.
+    Uses the SAME separator-folding + home-itself-tail
     stripping the operand classifier uses, so ``/home/alice/`` and ``/home/alice/*``
     count while a DESCENDANT (``/home/alice/.cache``) does not.
     """
@@ -674,11 +976,20 @@ def _rm_absolute_home_operand(text_lower: str) -> bool:
 #: argv walk. Only the FIRST opener on a line is handled per pass.
 #:
 #: The delimiter is a shell WORD: it ends at the first unquoted control operator or
-#: whitespace, so ``cat <<EOF;`` has delimiter ``EOF`` not ``EOF;`` (GPT 6.1 F3 — a
+#: whitespace, so ``cat <<EOF;`` has delimiter ``EOF`` not ``EOF;`` (a
 #: ``\S+`` capture grabbed ``EOF;`` and ran the body strip past the real ``EOF``
 #: terminator, dropping an executable ``rm`` line). The character class therefore
 #: excludes ``; & | < > ( ) `` and whitespace.
-_RM_HEREDOC_OPEN_RE = re.compile(r"(?<!<)<<-?(?!<)\s*([^\s;&|<>()]+)")
+#: A heredoc opener ``<<``/``<<-`` (not ``<<<``, not a shifted ``$(( a << b ))``)
+#: followed by its delimiter WORD. The delimiter may be single- or double-quoted
+#: with INTERIOR SPACES (``<<'END OF TEXT'``), partly quoted (``<<E'OF'``), or a
+#: bare unquoted run -- so capture a sequence of quoted spans and/or unquoted
+#: non-separator chars, NOT just ``[^\s…]+`` which stopped at the first space inside
+#: quotes and truncated ``'END OF TEXT'`` to ``END`` (its terminator then never
+#: matched, the body incl. a trailing ``rm -fr ~`` was dropped, and the wipe passed
+#: the home floor). ``_rm_strip_all_quotes`` dequotes the
+#: captured word before it is matched against each body line as the terminator.
+_RM_HEREDOC_OPEN_RE = re.compile(r"(?<!<)<<-?(?!<)\s*((?:'[^']*'|\"[^\"]*\"|[^\s;&|<>()'\"])+)")
 
 
 def _rm_strip_heredoc_bodies(source: str) -> str:
@@ -687,71 +998,104 @@ def _rm_strip_heredoc_bodies(source: str) -> str:
     ``cat > notes.md <<'EOF'`` feeds the following lines to the command on STDIN,
     never parsed as commands. Yet ``_split_shell_words`` flattens a newline to
     whitespace, so a body line ``rm -fr /`` (prose) reads as an ``rm`` command and
-    the floor refuses what base allowed (Security Scope FP). An EVALUATOR heredoc
+    the floor refuses what base allowed. An EVALUATOR heredoc
     (``bash <<'EOF'``) that runs its stdin is still caught by the whole-text regex.
     An UNQUOTED delimiter (``<<EOF``) runs ``$(…)`` / backticks in its body, so those
-    executed substitutions are kept for classification (GPT 6.1 F2). The opener must
-    be a REAL ``<<`` — unquoted, unescaped, not ``<<<``, not ``$((… << …))`` (Opus).
+    executed substitutions are kept for classification. The opener must
+    be a REAL ``<<`` — unquoted, unescaped, not ``<<<``, not ``$((… << …))``.
     """
     if "<<" not in source:
         return source
+    # Fold BACKSLASH LINE-CONTINUATIONS before anything else: a ``\`` at a physical
+    # line end splices the next line onto this one in the shell, so a ``<<`` or a
+    # delimiter split across a continuation must be read as one logical line.
+    # Folding also keeps the quote scan below from treating the spliced
+    # remainder as a fresh unquoted line.
+    source = source.replace("\\\n", "")
     lines = source.split("\n")
+    # Quote and command-substitution state is computed over the WHOLE source in ONE
+    # pass and indexed by ABSOLUTE offset, so a quote opened on an earlier physical
+    # line is still seen as open here. The per-LINE masks reset state at each line
+    # start, so a quoted multi-line string (``printf '%s\n' 'note<newline><<EOF'``)
+    # made ``<<EOF`` on the later line look unquoted, the stripper took it as an
+    # unterminated heredoc, and the real ``rm -fr "$HOME"`` after it was discarded
+    # -> a home-wipe bypass.
+    g_single = _rm_single_quoted_positions(source)
+    g_quoted = _rm_quoted_positions(source)
+    g_cmdsub_open = _rm_cmdsub_open_mask(source)
+    # Absolute offset of each physical line's first char in ``source`` (the ``\n``
+    # separators are one char each).
+    line_start: "list[int]" = []
+    acc = 0
+    for ln in lines:
+        line_start.append(acc)
+        acc += len(ln) + 1
     out: "list[str]" = []
     i = 0
     n = len(lines)
     while i < n:
         line = lines[i]
         out.append(line)
-        # Find a REAL heredoc opener. Quote mask computed ONCE per line (per-match
-        # rescan was O(N**2), froze the gate on a ``'<<a'`` flood; Opus). An opener
+        base = line_start[i]
+        # Find a REAL heredoc opener. State comes from the WHOLE-source masks indexed
+        # at ``base + local`` (cross-line), not a fresh per-line scan. An opener
         # single-quoted, backslash-escaped, or in ``$((… << …))`` arithmetic is
         # literal and opens no heredoc.
         delim = None
-        single = _rm_single_quoted_positions(line)
-        quoted = _rm_quoted_positions(line)
-        # Open-cmdsub state as a per-index mask, computed ONCE per line: a ``<<``
-        # inside an open ``$(…)`` is a real operator, elsewhere in double quotes it
-        # is literal (read per index, O(1)).
-        cmdsub_open = _rm_cmdsub_open_mask(line)
+
+        def _single(k: int, _b: int = base) -> bool:
+            idx = _b + k
+            return idx < len(g_single) and g_single[idx]
+
+        def _quoted(k: int, _b: int = base) -> bool:
+            idx = _b + k
+            return idx < len(g_quoted) and g_quoted[idx]
+
+        def _cmdsub(k: int, _b: int = base) -> bool:
+            idx = _b + k
+            return idx < len(g_cmdsub_open) and g_cmdsub_open[idx]
+
         # First UNQUOTED ``#`` starting a comment — a ``<<`` after it is commented
-        # out, not an opener (Opus 5.5 F3).
+        # out, not an opener.
         comment_at = None
         for ci, cch in enumerate(line):
-            if (
-                cch == "#"
-                and not (ci < len(quoted) and quoted[ci])
-                and (ci == 0 or line[ci - 1] in " \t")
-            ):
+            if cch == "#" and not _quoted(ci) and (ci == 0 or line[ci - 1] in " \t"):
                 comment_at = ci
                 break
         for m in _RM_HEREDOC_OPEN_RE.finditer(line):
             s = m.start()
-            if s < len(single) and single[s]:
-                continue  # single-quoted → literal
+            if _single(s):
+                continue  # single-quoted (possibly opened on an earlier line) → literal
             if s > 0 and line[s - 1] == "\\":
                 continue  # backslash-escaped → literal
             # A DOUBLE-quoted ``<<`` is literal UNLESS inside an open ``$(…)`` /
-            # backtick (``--body "$(cat <<EOF …)"``); only this branch needs the
-            # O(N) cmdsub scan, so the common case stays O(N).
-            if s < len(quoted) and quoted[s] and not (s < len(cmdsub_open) and cmdsub_open[s]):
+            # backtick (``--body "$(cat <<EOF …)"``).
+            if _quoted(s) and not _cmdsub(s):
                 continue
             # Arithmetic shift ``$(( a << b ))``: a ``((`` opened before with no
             # closing ``))`` yet means ``<<`` is an operator, not a heredoc.
             if line[:s].count("((") > line[:s].count("))"):
                 continue
+            # A ``<<`` INSIDE a parameter expansion ``${…}`` is expansion text, not a
+            # redirection (``echo ${v:-<<'x'}``). An unclosed ``${`` before this
+            # position (more ``${`` than ``}``) means ``<<`` opens no heredoc -- so
+            # the stripper does not take the ``${v:-<<'x'}`` as a quoted heredoc and
+            # discard a real trailing ``rm -rf "$HOME"`` (GPT 6.1).
+            if line[:s].count("${") > line[:s].count("}"):
+                continue
             # A ``<<`` after an unquoted ``#`` is a COMMENT — opens no heredoc, so a
-            # following ``rm`` line is a REAL command (Opus 5.5 F3).
+            # following ``rm`` line is a REAL command.
             if comment_at is not None and s > comment_at:
                 continue
             # Take the WHOLE delimiter word and strip surrounding quotes, so
             # ``<<'EOF'`` / ``<<EOF'X'`` delimit on the dequoted word and a partial
-            # ``EOF`` is not mistaken for the terminator (Opus 5.5 F3).
+            # ``EOF`` is not mistaken for the terminator.
             raw_delim = m.group(1)
             delim = _rm_strip_all_quotes(raw_delim)
             # A QUOTED delimiter (``<<'EOF'`` / ``<<"EOF"``) suppresses ALL expansion
             # in the body — it is pure data. An UNQUOTED delimiter (``<<EOF``) lets
             # the shell RUN ``$(…)`` / backticks in the body before feeding stdin to
-            # the command (GPT 6.1 F2), so those executed substitutions must still be
+            # the command, so those executed substitutions must still be
             # classified rather than silently stripped.
             delim_quoted = raw_delim != delim
             break
@@ -762,7 +1106,7 @@ def _rm_strip_heredoc_bodies(source: str) -> str:
         # allows leading tabs). If NO terminator exists before EOF the ``<<`` runs
         # its body to EOF, so STOP: every remaining line is that heredoc's data, and
         # continuing to probe each later line as its own opener is O(lines**2) and
-        # froze the gate on a ``:<<x`` flood (Opus 5.5 perf). Terminator indices for
+        # froze the gate on a ``:<<x`` flood. Terminator indices for
         # a delimiter are found by one forward pass, each line visited once overall.
         j = i + 1
         term = -1
@@ -773,21 +1117,24 @@ def _rm_strip_heredoc_bodies(source: str) -> str:
                 break
             j += 1
         if term < 0:
-            # Unterminated opener -> the shell runs the REST of input as this
-            # heredoc's body to EOF. A QUOTED delimiter suppresses expansion so that
-            # tail is pure data and is dropped; an UNQUOTED one still expands ``$(…)``
-            # / backticks in that tail, so KEEP those executed substitutions (GPT 6.1
-            # F1). Either way STOP: probing each later line as its own opener is
-            # O(lines**2) and froze the gate on a ``:<<x`` flood (Opus 5.5 perf).
+            # Unterminated opener. A QUOTED delimiter (``<<'EOF'``) is unambiguously
+            # a real heredoc -- its body runs to EOF as pure data with no expansion,
+            # so DROP it (``cat <<'EOF'\nrm -fr /`` is prose, allowed). An UNQUOTED
+            # ``<<x`` is often NOT a heredoc at all but a ``<<`` bash never reads as
+            # one (``echo ${v:-<<x}``, ``echo $[1<<2]``, ``"$(echo "<<x")"``)
+            # mis-detected as an opener; dropping the rest would silently discard a
+            # real trailing ``rm -rf $HOME``. For the unquoted case FAIL SAFE: KEEP
+            # every remaining line for classification. Either way STOP probing
+            # further openers here -- the kept lines are emitted as data, not
+            # re-scanned as their own openers, so this stays O(1), not the
+            # O(lines**2) re-probe that froze the gate.
             if not delim_quoted:
-                kept = _substitution_bodies("\n".join(lines[i + 1 :]))
-                if kept:
-                    out.append(" ; ".join(kept))
+                out.extend(lines[i + 1 :])
             break
         # An UNQUOTED heredoc runs ``$(…)`` / backticks in its body before the
         # command reads stdin, so KEEP those executed substitutions (drop only the
         # literal prose around them); a QUOTED delimiter suppresses expansion, so
-        # its whole body is pure data and is dropped (GPT 6.1 F2).
+        # its whole body is pure data and is dropped.
         if not delim_quoted:
             body_text = "\n".join(lines[i + 1 : term])
             kept = _substitution_bodies(body_text)
@@ -801,7 +1148,7 @@ def _rm_strip_heredoc_bodies(source: str) -> str:
 def _rm_strip_comments(source: str) -> str:
     """*source* with every shell COMMENT removed (from an unquoted word-initial
     ``#`` up to, not including, the next newline). A comment is never executed, so
-    ``make clean # safer than rm -fr ~`` runs no ``rm`` (Security Scope). Quote
+    ``make clean # safer than rm -fr ~`` runs no ``rm``. Quote
     state comes from the shared ``_iter_shell_chars`` machine and restarts unquoted
     after each comment, so a quote inside comment text cannot open a span that
     hides the next line."""
@@ -860,56 +1207,74 @@ def _recursive_force_rm_targets(
     if "rm" not in text_lower and not _RM_OBFUSCATION_MACHINERY_RE.search(text_lower):
         return frozenset()
     # A pathological opener chain (``"$( " * 1000``) makes the walk emit a frame
-    # per opener and reprocess O(openers²) (Opus perf). Far past any real command
+    # per opener and reprocess O(openers²). Far past any real command
     # we must NOT skip classification — that fails OPEN: ``: `` + 201×``"$(true)"``
     # + ``; rm -fr ~`` has its wipe OUTSIDE every substitution, invisible to the
-    # whole-text ``-rf`` regex (GPT 6.1 F2). Disable only the expensive descent;
+    # whole-text ``-rf`` regex. Disable only the expensive descent;
     # the top-level per-command argv classification below still runs.
     heavy_substitution = (
         text_lower.count("$(") + text_lower.count("`") > _RM_SUBSTITUTION_OPENER_CAP
     )
     # A heredoc body is stdin DATA, never parsed as commands — strip it from BOTH
     # views BEFORE the walk, so the walk never descends a ``$(…)``/backtick that is
-    # really a markdown span in a commit/PR/doc heredoc naming ``rm -fr /`` as prose
-    # (Security Scope FP). An evaluator heredoc (``bash <<EOF``) that executes its
+    # really a markdown span in a commit/PR/doc heredoc naming ``rm -fr /`` as prose.
+    # An evaluator heredoc (``bash <<EOF``) that executes its
     # stdin is still caught by the whole-text regex on the contiguous literal.
     text_lower = _rm_strip_heredoc_bodies(text_lower)
     if raw_text is not None:
         raw_text = _rm_strip_heredoc_bodies(raw_text)
     # A trailing ``# …`` comment is never executed, so an ``rm`` named in it is not
-    # a command (Security Scope: ``make clean # safer than rm -fr ~``).
+    # a command (e.g. ``make clean # safer than rm -fr ~``).
     text_lower = _rm_strip_comments(text_lower)
     if raw_text is not None:
         raw_text = _rm_strip_comments(raw_text)
     # A ``bash -c '<payload>'`` whose shell is an operand of a data consumer
     # (``echo bash -c '…'`` / ``cat sh -c '…'``) PRINTS the payload — it is never
     # executed, so the frame the walk descends from it must not be classified
-    # (Design Review: base allowed these mentions). Collect those payload strings
+    # (base allowed these mentions). Collect those payload strings
     # from the top-level argv so the matching descended frame can be skipped.
     shell_c_data = _rm_shell_c_data_payloads(_split_shell_words(text_lower))
     found: set[str] = set()
     # Under a pathological opener chain, skip the O(openers²) walk but STILL
     # classify the top-level command: split on unquoted newlines + top-level ``;``
     # and classify each simple command's argv (raw + decoded), so ``…; rm -fr ~``
-    # outside the openers is caught — linear, no substitution descent (GPT 6.1 F2:
-    # budget exhaustion must not fail open).
+    # outside the openers is caught — linear, no substitution descent
+    # (budget exhaustion must not fail open).
     if heavy_substitution:
+        heavy_confirmed_home = False
         for line in _rm_split_unquoted_newlines(text_lower):
             for seg in _rm_split_top_level_semicolons(line):
                 toks = _split_shell_words(seg)
                 found |= _rm_targets_in_argv(toks, strip_quotes=False)
                 found |= _rm_targets_in_argv(toks, strip_quotes=True)
+                # Also run the de-quoted exact root/home scan so a SPLIT spelling
+                # (``r''m``) whose program word only resolves after quote removal is
+                # caught on the heavy path too -- matching the substitution-body and
+                # tail scans (49 ``"$(true)"`` decoys then ``; r''m -fr ~`` trips the
+                # heavy path at the opener cap, so the top-level segment is where the
+                # wipe lands). Run it on the quote-preserving ``seg`` so an operand
+                # keeps its literal ``;`` rather than splitting the span.
+                found |= _rm_frame_overflow_targets([], raw_source=seg)
                 # The outer ``rm``'s own ``$(…)`` operand resolves to its OUTPUT:
                 # ``rm -rf <decoys> $(echo ~)`` keeps the unresolved ``$(echo ~)``
                 # in this split and misses home, so a wipe whose home target is the
                 # STATIC output of a benign producer escapes the per-segment pass
-                # (GPT security-class: budget exhaustion must not fail open). Reuse
+                # (budget exhaustion must not fail open). Reuse
                 # the narrow ``echo``/``printf`` resolver the non-heavy walk runs; a
                 # dynamic generator resolves to a non-matching sentinel, so this
                 # only ADDS coverage.
                 resolved_seg = _rm_resolve_substitution_operands(toks)
                 if resolved_seg is not None:
-                    found |= _rm_targets_in_argv(resolved_seg, strip_quotes=True)
+                    resolved_targets = _rm_targets_in_argv(resolved_seg, strip_quotes=True)
+                    found |= resolved_targets
+                    # A ``home`` from the RESOLVED operand is CONFIRMED (the shell's
+                    # own producer output is home), so it is exempt from the final
+                    # quoted-home suppression -- which re-reads only ``text_lower``,
+                    # where the home spelling lives inside the UNRESOLVED ``$(…)`` and
+                    # so is invisible. Without this the confirmed wipe failed open
+                    # (e.g. ``rm -rf <decoys> $(echo ~)``).
+                    if "home" in resolved_targets:
+                        heavy_confirmed_home = True
             if {"root", "home"} <= found:
                 break
         # A wipe can live INSIDE a substitution body (``echo "$(true)"*201
@@ -919,7 +1284,7 @@ def _recursive_force_rm_targets(
         # substitution body with a flat regex (the quote-aware paren walk is
         # defeated by a dense ``"$(true)"`` run), bounded by ``_RM_DESCENT_BUDGET``
         # bodies -- a wipe past the cap is still caught by the fail-closed
-        # whole-text regex (GPT 6.1 security-class fail-open fix).
+        # whole-text regex.
         if not ({"root", "home"} <= found):
             seen = 0
             for m in _RM_INNERMOST_SUBST_RE.finditer(text_lower):
@@ -927,47 +1292,139 @@ def _recursive_force_rm_targets(
                     break
                 seen += 1
                 body = m.group(1) if m.group(1) is not None else (m.group(2) or "")
-                found |= _rm_targets_in_argv(_split_shell_words(body), strip_quotes=True)
+                body_toks = _split_shell_words(body)
+                found |= _rm_targets_in_argv(body_toks, strip_quotes=True)
+                # Also run the cheap de-quoted exact root/home scan so a SPLIT
+                # spelling (``r''m``) whose program word only resolves after
+                # quote removal is caught here too, matching the frame walk. Scan
+                # the quote-preserving ``body`` so a literal ``;`` in an operand
+                # does not split the span.
+                found |= _rm_frame_overflow_targets([], raw_source=body)
                 if {"root", "home"} <= found:
                     break
+        # A dense run of UNBALANCED openers (``echo "$(true" * 199 rm -fr ~``) has
+        # no closing ``)``, so the innermost-body regex above matches nothing and
+        # the trailing ``rm -fr ~`` -- which bash runs INSIDE the last open
+        # substitution -- is read by the top-level split as the data consumer
+        # ``echo``'s argument, not an executed command. Do ONE bounded level of
+        # descent: take the text after the LAST unbalanced ``$(`` / backtick opener
+        # and classify it as its own command. Fixed single level, no recursion, O(n)
+        # over the text -- the recursive frame walk (its O(openers**2) cost is why
+        # this heavy path exists) is NOT re-entered. Deeper nesting past this one
+        # level is a residual left to the whole-text regex net and the sandbox.
+        if not ({"root", "home"} <= found):
+            tail = _rm_last_unbalanced_substitution_tail(text_lower)
+            if tail is not None:
+                # The tail begins mid-way through the opener's own body
+                # (``true"  rm -rf /``) and carries the opener's dangling quote, which
+                # would fuse the whole tail into one unterminated-quote token. Drop
+                # bare ``"`` / ``'`` chars so the trailing command's words split
+                # normally, then classify the tail as one command.
+                # Run the de-quoted exact scan on the RAW tail first (it removes
+                # quotes internally, so a split ``r''m`` program word resolves);
+                # then drop stray quote chars for the plain argv pass, which needs
+                # the trailing command's words to split normally.
+                found |= _rm_frame_overflow_targets([], raw_source=tail)
+                tail = tail.replace('"', " ").replace("'", " ")
+                found |= _rm_targets_in_argv(_split_shell_words(tail), strip_quotes=True)
+        # The heavy fallback skips the recursive frame walk, which is where an
+        # EXECUTED shell ``-c`` payload (``bash -c 'rm -fr "$HOME"'``) is normally
+        # classified, so a ``bash -c`` / ``sh -c`` home/root wipe buried in a
+        # heavy-substitution input failed OPEN. Run the same
+        # executed-``-c``-payload pass the non-heavy path runs: classify each
+        # payload's tokens in its OWN quote context, and a home verdict with a LIVE
+        # home expansion in the payload is CONFIRMED (exempt from the suppression).
+        for payload in _rm_shell_c_executed_payloads(_split_shell_words(text_lower)):
+            payload_targets = _rm_targets_in_argv(_split_shell_words(payload), strip_quotes=True)
+            found |= payload_targets - {"home"}
+            # The payload is EXECUTED, so its home is confirmed on a live
+            # ``$HOME``/``~`` expansion OR an absolute path equal to the real home
+            # (``rm -fr /home/alice`` where that IS $HOME) -- both are real wipes the
+            # top-level ``text_lower`` carries only inside the quoted ``-c`` body.
+            if "home" in payload_targets and (
+                _rm_has_live_home_expansion(payload.lower()) or _rm_absolute_home_operand(payload)
+            ):
+                found.add("home")
+                heavy_confirmed_home = True
         if (
             "home" in found
+            and not heavy_confirmed_home
             and not _rm_has_live_home_expansion(text_lower)
             and not _rm_absolute_home_operand(text_lower)
         ):
             found.discard("home")
         return frozenset(found)
+    # A ``home`` verdict confirmed from a RESOLVED command-substitution operand
+    # (``rm -rf $(printf %s/me /home)`` = a real ``/home/me`` wipe) is likewise
+    # exempt from the final suppression: the home spelling lives in the resolved
+    # OUTPUT, which the original text does not carry as a live token, so the
+    # suppression's ``text_lower`` re-check cannot see it and would fail the wipe
+    # open. Set by the resolved-substitution pass; false otherwise.
+    subst_confirmed_home = False
+    # A ``home`` verdict confirmed inside an EXECUTED NESTED frame -- a ``bash -c``
+    # / ``sh -c`` payload body, or a ``$(…)`` / backtick execution body the shell
+    # actually RUNS -- is a real wipe (``bash -c 'rm -fr /home/alice'``,
+    # ``echo "$(rm -fr /home/alice)"``). Its home operand lives in the nested
+    # frame's source, not as a live token of the top-level text, so the final
+    # quoted-home suppression's ``text_lower`` re-check cannot see it and would
+    # fail the wipe open. The walk's
+    # first frame is the whole top-level command; every LATER frame is such an
+    # executed descent, so a ``home`` that a later frame introduces is confirmed.
+    frame_confirmed_home = False
+    # Shared TOKEN budget across all budget-exhausted frames. A short deep frame
+    # (``echo ~ | xargs rm -fr`` at nesting depth 65) costs a handful of tokens and
+    # is still reached; a flood of long suffix frames (200 ``;``-joined commands)
+    # spends it fast and stops. Bounds the past-budget flat classification to O(1)
+    # total rather than O(frames x tokens).
+    flat_token_budget = _RM_FLAT_TOKEN_BUDGET
     # Cap how many frames are CLASSIFIED. A pathological opener chain
     # (``"$( " * 1000``) makes the shell walk emit a frame per opener; classifying
-    # every one is O(frames × span) and ran for minutes on the synchronous gate
-    # (Opus, security-class perf). The cap fails CLOSED — base's contiguous
+    # every one is O(frames × span) and ran for minutes on the synchronous gate.
+    # The cap fails CLOSED — base's contiguous
     # ``rm -rf /`` / ``rm -rf ~`` literal still runs on the whole text — so a wipe
     # hidden past the cap is caught by base, never allowed.
     frames_left = _RM_DESCENT_BUDGET
-    for source, norm_tokens, repaired in _rm_walk_frames(text_lower, raw_text):
+    for frame_index, (source, norm_tokens, repaired) in enumerate(
+        _rm_walk_frames(text_lower, raw_text)
+    ):
+        home_before_frame = "home" in found
         if frames_left <= 0:
-            # Budget exhausted.  Do NOT break — a wipe hidden past the budget
-            # would fail open (GPT 6.1 :957, ``rm -fr ~`` behind 65 nested
-            # ``$(``).  Instead, do a FLAT classification: run the main token
-            # loop (which is O(tokens)) but skip the expensive recursive descent
-            # into nested payloads by passing a zero-budget cell.  The flat scan
-            # catches the ``rm`` that is directly visible in the frame's own
-            # tokens; only the nested-``sh -c``/brace/xargs expansion is elided.
-            flat_targets = _rm_targets_in_argv(norm_tokens, strip_quotes=False, _budget=[0])
-            found |= flat_targets
-            # Also flat-scan the raw view for the same frame so a widened
-            # flag spelling that the decoded view normalised away is caught.
-            for line in _rm_split_unquoted_newlines(source):
-                flat_targets_raw = _rm_targets_in_argv(
-                    _split_shell_words(line), strip_quotes=True, _budget=[0]
-                )
-                found |= flat_targets_raw
+            # Budget exhausted. Do NOT fail open (``rm -fr ~`` behind 65 nested
+            # ``$(`` must still deny). The remaining frames are overlapping suffixes
+            # OR deep nested bodies; classifying each in FULL is O(frames x tokens)
+            # (a 200-command line stalled the gate under coverage). Two tiers:
+            #
+            # (1) ALWAYS run the CHEAP exact root/home scan on EVERY remaining frame
+            # (``_rm_frame_overflow_targets`` -- one linear pass, no brace/candidate
+            # machinery, matches ``rm`` on its de-quoted spelling so ``r''m`` is
+            # caught). It cannot be exhausted, so a wipe hidden past the shared token
+            # budget (120 padded substitutions then ``echo "$(r''m -fr ~)"``) is
+            # still classified rather than silently skipped.
+            # The whole-text deny-net regex does NOT cover a split
+            # spelling, so this scan is the net that does.
+            #
+            # (2) The EXPENSIVE full classification (brace/dot/candidate expansion)
+            # stays gated on the shared token budget, bounding total work.
+            #
+            # Run the cheap scan on the QUOTE-PRESERVING source (per unquoted line),
+            # not the de-quoted ``norm_tokens`` -- an operand's literal ``'a;b'``
+            # must keep its quotes so the glued-boundary split does not read the
+            # ``;`` as a command boundary and drop the trailing home operand.
+            for ov_line in _rm_split_unquoted_newlines(source):
+                found |= _rm_frame_overflow_targets([], raw_source=ov_line)
+            if flat_token_budget > 0:
+                flat_token_budget -= len(norm_tokens)
+                found |= _rm_targets_in_argv(norm_tokens, strip_quotes=False, _budget=[0])
+                for line in _rm_split_unquoted_newlines(source):
+                    found |= _rm_targets_in_argv(
+                        _split_shell_words(line), strip_quotes=True, _budget=[0]
+                    )
             if {"root", "home"} <= found:
                 break
             continue
         frames_left -= 1
         # Skip a descended payload frame that is a data-consumer's printed ``-c``
-        # mention, not an executed command (Design Review).
+        # mention, not an executed command.
         if source.strip() in shell_c_data:
             continue
         # The DECODED view (payload walk's own tokens) is always classified: it
@@ -975,11 +1432,18 @@ def _recursive_force_rm_targets(
         # ``$'\u002f'`` is caught, and a ``$'"/"'`` filename's LITERAL quotes stay in
         # the token so it is NOT misread as root. A frame spanning unquoted NEWLINES
         # is classified PER LINE — the shell runs each line separately, so a later
-        # line's tokens must not fuse into an earlier ``rm``'s argv (Security Scope).
+        # line's tokens must not fuse into an earlier ``rm``'s argv.
+        #
+        # The program and flag WORDS are taken from this decoded view (so ``r''m`` ->
+        # ``rm`` and ``-f$'r'`` -> ``-fr`` resolve), but each OPERAND keeps its
+        # quote-preserving source: a decoded operand drops its quotes, and the one
+        # quote-aware command-boundary split would then read a literal ``'a;b'``
+        # filename's ``;`` as a boundary and drop the trailing home operand.
         source_lines = _rm_split_unquoted_newlines(source)
         decoded_targets: set[str] = set()
         if len(source_lines) == 1:
-            decoded_targets |= _rm_targets_in_argv(norm_tokens, strip_quotes=False)
+            merged = _rm_decoded_argv_preserving_operands(_split_shell_words(source), norm_tokens)
+            decoded_targets |= _rm_targets_in_argv(merged, strip_quotes=False)
         else:
             for line in source_lines:
                 decoded_targets |= _rm_targets_in_argv(_split_shell_words(line), strip_quotes=False)
@@ -987,7 +1451,7 @@ def _recursive_force_rm_targets(
         # expands a SINGLE-QUOTED ``'~'`` / ``'$HOME'`` operand (a literal cwd file
         # bash never expands) to the real home path, which the home matcher then
         # equals (``cd ~/src && rm -fr '~'`` deletes a file named ``~``; base allows
-        # it — Security Scope). Re-classify the DECODED view of the source with its
+        # it). Re-classify the DECODED view of the source with its
         # single-quoted spans MASKED to spaces: if ``home`` disappears, it came only
         # from a single-quoted literal and must not count. ``root`` is unaffected (a
         # single-quoted ``'/'`` is still the literal root bash deletes), and a frame
@@ -997,7 +1461,7 @@ def _recursive_force_rm_targets(
         # literal cwd file bash never expands (``'~'`` / ``"~"`` / ``\~`` / ``'$HOME'``),
         # to the real home path, which the home matcher then equals — kept alive only
         # by an unrelated live ``~`` elsewhere on the line (``cd ~/src && rm -fr '~'``
-        # deletes a file named ``~``; base allows it — Security Scope). Re-classify the
+        # deletes a file named ``~``; base allows it). Re-classify the
         # DECODED view of the source with its NON-LIVE home spellings neutralised: if
         # ``home`` disappears, it came only from a literal and must not count. ``root``
         # is unaffected (a quoted ``'/'`` is still the literal root bash deletes), and a
@@ -1005,12 +1469,38 @@ def _recursive_force_rm_targets(
         if "home" in decoded_targets:
             masked_src = _rm_mask_non_live_home(source)
             if masked_src != source:
+                # Re-classify to see whether the ``home`` verdict survives once the
+                # non-live home spellings are neutralised. Mask each merged-argv
+                # TOKEN in place and keep the operand's own quoting, rather than
+                # masking the raw TEXT: masking the text drops a double-quote
+                # delimiter, which re-exposes a literal ``;``/``|`` inside a
+                # double-quoted operand (``"a;b"`` -> ``a;b``) and re-triggers the
+                # boundary mis-split that would wrongly drop a live home target
+                # elsewhere in the span. A token masked to only blanks/empties is a
+                # neutralised non-live literal and is dropped so it cannot act as a
+                # spurious boundary either.
                 masked_home: set[str] = set()
-                for mline in _rm_split_unquoted_newlines(masked_src):
-                    for _msrc, mtoks in _shell_payload_walk(mline):
-                        masked_home |= _rm_targets_in_argv(mtoks, strip_quotes=False)
-                        if {"root", "home"} <= masked_home:
-                            break
+                for mline in _rm_split_unquoted_newlines(source):
+                    merged_line = _rm_decoded_argv_preserving_operands(
+                        _split_shell_words(mline),
+                        next(
+                            (toks for _s, toks in _shell_payload_walk(mline)),
+                            _split_shell_words(mline),
+                        ),
+                    )
+                    masked_tokens: list[str] = []
+                    for tok in merged_line:
+                        masked = _rm_mask_non_live_home(tok)
+                        # A token masked to nothing (a single-quoted ``'~'`` literal)
+                        # contributes no operand; drop it so it is not an empty token.
+                        if masked.strip() == "" and tok.strip() != "":
+                            continue
+                        # Keep the operand's literal quoting so a neutralised double-
+                        # quoted ``"a;b"`` does not re-expose its ``;`` as a boundary.
+                        masked_tokens.append(tok if masked == _rm_strip_all_quotes(tok) else masked)
+                    masked_home |= _rm_targets_in_argv(masked_tokens, strip_quotes=False)
+                    if {"root", "home"} <= masked_home:
+                        break
                 if "home" not in masked_home:
                     decoded_targets.discard("home")
         found |= decoded_targets
@@ -1031,21 +1521,24 @@ def _recursive_force_rm_targets(
         for line in source_lines:
             found |= _rm_targets_in_argv(_split_shell_words(line), strip_quotes=True)
         # A command-substitution OPERAND resolves to its OUTPUT: ``rm -rf
-        # "$(printf /)"`` keeps the unresolved ``$(printf /)`` and misses the root
-        # (GPT security-class). Resolve each ``$(…)`` / backtick operand to the word
+        # "$(printf /)"`` keeps the unresolved ``$(printf /)`` and misses the root.
+        # Resolve each ``$(…)`` / backtick operand to the word
         # it STATICALLY expands to (the narrow ``echo``/``printf`` resolver) and
         # re-classify. A dynamic generator resolves to a non-matching sentinel, so
         # this only ADDS coverage.
         resolved_subst = _rm_resolve_substitution_operands(_split_shell_words(source))
         if resolved_subst is not None:
-            found |= _rm_targets_in_argv(resolved_subst, strip_quotes=True)
+            subst_targets = _rm_targets_in_argv(resolved_subst, strip_quotes=True)
+            found |= subst_targets
+            if "home" in subst_targets:
+                subst_confirmed_home = True
         # Execution-substitution bodies: a ``$(…)`` / backtick / process-sub that
         # EXECUTES its command, so an ``rm`` inside is a real wipe even when the
         # output is consumed as data (``grep -rn "$(rm -rf /)"`` runs the wipe
         # first). The shared ``_substitution_bodies`` walk is quote-aware for its own
         # nesting but still extracts a backtick / ``$(…)`` body sitting inside a
         # SINGLE-quoted span, which bash treats as a literal (``git commit -m 'see
-        # `rm -rf /`'`` runs no ``rm`` — Security Scope zero-text FP). So mask the
+        # `rm -rf /`'`` runs no ``rm``). So mask the
         # single-quoted spans (via the kept ``_rm_single_quoted_positions``) to
         # spaces before the walk; the surviving ``$(…)`` / backtick bodies execute.
         # A bare ``(…)`` subshell / ``${ …;}`` funsub holding an exact-root wipe
@@ -1054,54 +1547,48 @@ def _recursive_force_rm_targets(
         _sq = _rm_single_quoted_positions(source)
         _masked = "".join(" " if (i < len(_sq) and _sq[i]) else c for i, c in enumerate(source))
         for body in _substitution_bodies(_masked):
-            found |= _rm_targets_in_argv(_split_shell_words(body), strip_quotes=True)
-        # ``<producer> | xargs [opts] rm [flags]`` APPENDS the producer's stdin
-        # words to ``rm``'s argv, so the target lives in NO token of the ``rm``
-        # command (GPT 5.6 UPHOLD-FENCED: ``echo "$HOME" | xargs rm -rf`` wipes
-        # home). ``_xargs_reconstructed_command_with_flags`` rebuilds the effective
-        # command line for EVERY executed xargs pipeline on the line (GPT 6.1 F1),
-        # KEEPING rm's own ``-fr``/``-rf`` (the flag-stripping variant dropped them,
-        # so a wrapped wipe failed open -- GPT 6.1 security-class). Each result is
-        # classified by the structural path (which denies only the exact root/home
-        # target), so a descendant operand (``echo /tmp/x | xargs rm -rf``) stays
-        # allowed at base parity.
-        for xargs_cmd in _shell_normalizer._xargs_reconstructed_command_with_flags(
-            _split_shell_words(source)
-        ):
-            found |= _rm_targets_in_argv(_split_shell_words(xargs_cmd), strip_quotes=True)
+            body_targets = _rm_targets_in_argv(_split_shell_words(body), strip_quotes=True)
+            found |= body_targets
+            # A ``$(…)`` / backtick body EXECUTES, so a ``home`` wipe inside it is a
+            # confirmed real wipe (``echo "$(rm -fr /home/alice)"`` runs the rm). Its
+            # operand lives in the body, not as a live top-level token, so exempt it
+            # from the final quoted-home suppression.
+            if "home" in body_targets:
+                frame_confirmed_home = True
+        # A ``home`` verdict introduced by a LATER (executed, nested) frame -- a
+        # ``bash -c`` / ``sh -c`` payload body or a ``$(…)`` / backtick execution
+        # body -- is confirmed: the shell runs that frame, so its ``rm -fr
+        # /home/alice`` is a real wipe even though the top-level text carries the
+        # operand only inside quotes/a substitution. Exempt it from the final
+        # suppression.
+        if frame_index > 0 and "home" in found and not home_before_frame:
+            frame_confirmed_home = True
         if {"root", "home"} <= found:
             break
     # An EXECUTED shell ``-c`` payload (``bash -c 'rm -fr "$HOME"'``) runs in a
     # CHILD shell that expands ``$HOME``/``~`` by SPELLING, so classify the payload
     # tokens directly — the walk's ``$HOME``->login-home expansion is ``/``-rooted
     # only where ``expanduser`` is, so a drive-path home (Windows CI) forms no home
-    # verdict (GPT 6.1). ``root`` always counts; ``home`` only on a LIVE home
+    # verdict. ``root`` always counts; ``home`` only on a LIVE home
     # expansion in the payload's OWN quote state (``"$HOME"`` live, ``'$HOME'`` not).
     payload_live_home = False
     for payload in _rm_shell_c_executed_payloads(_split_shell_words(text_lower)):
         p_targets = _rm_targets_in_argv(_split_shell_words(payload), strip_quotes=True)
-        # An xargs pipeline INSIDE the executed payload (``bash -c 'echo "$HOME" |
-        # xargs rm -fr'``) hides the home operand on xargs' stdin, so reconstruct it
-        # in the PAYLOAD's own quote context and fold its targets in -- otherwise the
-        # outer single-quote discard below drops a verdict the payload never had
-        # (GPT 6.1 F1). The payload's own ``"$HOME"`` is live, so this is a real wipe.
-        for xargs_cmd in _shell_normalizer._xargs_reconstructed_command_with_flags(
-            _split_shell_words(payload)
-        ):
-            p_targets |= _rm_targets_in_argv(_split_shell_words(xargs_cmd), strip_quotes=True)
         found |= p_targets - {"home"}
         if "home" in p_targets and _rm_has_live_home_expansion(payload.lower()):
             found.add("home")
             payload_live_home = True
     # A quoted-literal ``'~'`` / ``'$HOME'`` is a cwd file the shell never expands;
-    # drop a ``home`` verdict with NO live home expansion (Security Scope). A real
+    # drop a ``home`` verdict with NO live home expansion. A real
     # ``$HOME``/``~``, an EXECUTED ``-c`` payload verdict (quote state applied
     # above), or an ABSOLUTE-PATH equality (``rm -fr /home/alice`` = real home, no
-    # ``$HOME``/``~`` token) all KEEP it — the last would wrongly drop, a common
-    # irreversible-wipe spelling (GPT 6.1 F3).
+    # ``$HOME``/``~`` token) all KEEP it — any would wrongly drop a common
+    # irreversible-wipe spelling.
     if (
         "home" in found
         and not payload_live_home
+        and not subst_confirmed_home
+        and not frame_confirmed_home
         and not _rm_has_live_home_expansion(text_lower)
         and not _rm_absolute_home_operand(text_lower)
     ):
@@ -1123,7 +1610,7 @@ def _rm_mask_non_live_home(source: str) -> str:
     A bare ``~`` and a double-quoted ``"$HOME"`` are LEFT INTACT, so a genuine home
     wipe still classifies. The result is handed to the decoded re-classification:
     if the decoded ``home`` verdict survives this blanking it was a real live
-    expansion; if it disappears it came only from a literal (Security Scope FP).
+    expansion; if it disappears it came only from a literal.
     """
     out: list[str] = []
     prev_state = 0
@@ -1154,8 +1641,8 @@ def _rm_single_quoted_positions(source: str) -> "list[bool]":
     double quotes, and a ``"`` toggles double-quote state only when NOT inside
     single quotes; a backslash outside single quotes escapes the next character.
     Replaces the per-match ``_index_in_single_quote`` rescan that scanned from 0
-    on every regex match — O(N**2) on the synchronous gate (Opus security-class,
-    ReDoS). ``mask[i]`` is True when index *i* is inside a single-quoted span.
+    on every regex match — O(N**2) on the synchronous gate.
+    ``mask[i]`` is True when index *i* is inside a single-quoted span.
     """
     return [state == 1 for state in _rm_quote_states(source)]
 
@@ -1183,7 +1670,7 @@ def _rm_quoted_positions(source: str) -> "list[bool]":
     span. Unlike :func:`_rm_single_quoted_positions` (which marks only single
     quotes, because single quotes suppress expansion), this marks either, so a
     heredoc ``<<`` operator that sits inside ``echo "<<EOF"`` is seen as literal
-    text and opens no heredoc (Opus security-class). ``mask[i]`` is True when *i*
+    text and opens no heredoc. ``mask[i]`` is True when *i*
     is quoted."""
     return [state != 0 for state in _rm_quote_states(source)]
 
@@ -1198,7 +1685,7 @@ def _rm_cmdsub_open_before(line: str, pos: int) -> bool:
     A ``(`` / ``)`` inside single quotes, inside double quotes without a leading
     ``$``, or backslash-escaped is literal. Used by the heredoc gate so a ``<<``
     inside ``"$(cat <<EOF …)"`` is seen as a REAL operator while a ``<<`` in a
-    plain double-quoted ``echo "<<EOF"`` stays literal (Security Scope / Opus).
+    plain double-quoted ``echo "<<EOF"`` stays literal.
     """
     return _rm_cmdsub_open_states(line)[min(pos, len(line))]
 
@@ -1240,7 +1727,7 @@ def _rm_cmdsub_open_mask(line: str) -> "list[bool]":
     """``mask[i]`` is True iff index *i* in *line* sits inside an OPEN ``$(…)`` /
     backtick / subshell command substitution -- the per-index form of
     :func:`_rm_cmdsub_open_before`, computed in ONE forward pass, so the heredoc
-    gate reads it per ``<<`` opener in O(1) rather than rescanning (Opus 5.5)."""
+    gate reads it per ``<<`` opener in O(1) rather than rescanning."""
     return _rm_cmdsub_open_states(line)[: len(line)]
 
 
@@ -1250,7 +1737,7 @@ def _rm_substitution_depth(source: str) -> "list[int]":
     ``depth[i]`` is how many ``$(…)`` / ``${…}`` / backtick / bare ``(…)``
     subshell bodies index *i* sits inside. A ``HOME=`` assignment with depth > 0
     runs in a subshell and does NOT persist to the parent shell, so it cannot
-    protect a parent ``rm`` from a home wipe (GPT 6.1 F1). An opener or closer
+    protect a parent ``rm`` from a home wipe. An opener or closer
     that is quoted or escaped is literal; quote state comes from the shared
     ``_iter_shell_chars`` machine. Backticks toggle a span rather than nest, which
     is sufficient here (a nested backtick must be escaped in bash anyway).
@@ -1301,7 +1788,7 @@ def _rm_resolve_substitution_operands(tokens: "list[str]") -> "list[str] | None"
 
     ``rm -rf --no-preserve-root "$(printf /)"`` reaches ``rm`` with operand ``/``,
     but the raw split keeps the unresolved ``$(printf /)`` so the matchers never see
-    ``/`` (GPT). Resolve a whole-token ``$(…)`` / backtick operand to its static
+    ``/``. Resolve a whole-token ``$(…)`` / backtick operand to its static
     expansion via the sibling argv floor's ``echo``/``printf`` resolver (literal
     first operand only). A dynamic generator resolves to the ``"\\x00"`` sentinel no
     matcher accepts, so this only ADDS coverage. Flags/non-subs left untouched.
@@ -1351,7 +1838,7 @@ def _rm_resolve_substitution_operands(tokens: "list[str]") -> "list[str] | None"
             # The opener did not balance. Advance PAST the scanned span (appending
             # those tokens verbatim) not by one — a chain of unclosed ``$(`` (``"$( "
             # * 1000``) would otherwise re-scan to the end per opener, O(openers²) and
-            # minutes on the gate (Opus perf). Scanned tokens keep their raw spelling.
+            # minutes on the gate. Scanned tokens keep their raw spelling.
             resolved.extend(tokens[i:j])
             i = j
             continue
@@ -1363,14 +1850,14 @@ def _rm_resolve_substitution_operands(tokens: "list[str]") -> "list[str] | None"
 #: Multi-call binaries that DISPATCH to the applet named by their first non-flag
 #: argument: ``busybox rm -rf /`` runs the ``rm`` applet (``toybox`` too). Here
 #: ``rm`` is the dispatcher's first ARGUMENT, not the program word and not behind
-#: an exec wrapper, so the plain scan + wrapper set both miss it (GPT). Matched
+#: an exec wrapper, so the plain scan + wrapper set both miss it. Matched
 #: positionally — ``busybox echo rm -rf /`` runs ``echo``, not ``rm``.
 _RM_APPLET_DISPATCHERS: frozenset[str] = frozenset({"busybox", "toybox"})
 
 #: Filesystem-MOVER programs: every non-flag argument is a PATH, never a program
 #: to run. A ``rm`` among a mover's operands (``env rm -fr rm rm …``, ``cp rm rm
 #: dst``) is a file named ``rm``, not a command, so it is skipped before the
-#: per-``rm`` span cap and suffix scan (GPT 6.1 F2). A data-PRINTER
+#: per-``rm`` span cap and suffix scan. A data-PRINTER
 #: (``echo``/``printf``) is already covered by ``_data_consumer_exempt``.
 _RM_MOVER_PROGRAMS: frozenset[str] = frozenset(
     {"rm", "cp", "mv", "ln", "mkdir", "rmdir", "touch", "chmod", "chown"}
@@ -1401,7 +1888,7 @@ def _rm_effective_span_program(programs: "list[str]", tokens: "list[str]", index
     # Skip the wrapper's OWN options AND assignments, not just ``VAR=val``: ``env
     # -i`` / ``env -u NAME`` / ``nice -n 5`` / ``env --`` precede the wrapped
     # command, so stopping at the first option mis-reads it as the mover and lets a
-    # 2000-operand flood reach the per-operand suffix scan (GPT 6.1 F3).
+    # 2000-operand flood reach the per-operand suffix scan.
     while arg < len(tokens):
         tok = tokens[arg]
         if tok == "--":
@@ -1433,7 +1920,7 @@ def _rm_deescape_unquoted_backslashes(text: str) -> str:
     ``\\r\\m -rf /``; unquoted, bash drops each backslash before an ordinary
     character, so ``\\r\\m`` becomes the word ``rm``. The outer walk's
     ``_decode_printf_escapes`` instead maps ``\\r`` to whitespace and drops the
-    ``r``, so the ``rm`` never reforms and the wipe was missed (Item 4).
+    ``r``, so the ``rm`` never reforms and the wipe was missed.
 
     Backslashes INSIDE single quotes are literal and are left untouched; a
     backslash outside single quotes removes itself and keeps the next character
@@ -1456,9 +1943,24 @@ def _rm_deescape_unquoted_backslashes(text: str) -> str:
 #: still hand this frame a FLATTENED argv (``['sh', '-c', 'rm', '-rf', '/']``);
 #: the tokens after ``-c`` are then the executed command, read here as their own
 #: argv so the ``rm`` leads its own command instead of sitting behind ``sh``.
+#: Programs whose ``-c <string>`` argument is a SHELL command string the program
+#: runs via a shell. The real shells run it directly; ``flock FILE -c 'cmd'`` runs
+#: ``cmd`` through ``/bin/sh -c``, so a ``flock /tmp/lock -c 'rm -fr ~'`` wipe is an
+#: executed shell payload too (GPT 6.1). The other common execution wrappers
+#: (``timeout``/``nice``/``nohup``/``env``/``sudo``) take a COMMAND, not a ``-c``
+#: shell string, so an ``rm`` behind them is already caught by the executor-wrapper
+#: denylist in ``_rm_targets_in_argv`` -- they are deliberately NOT listed here.
 _RM_SHELL_C_PROGRAMS: frozenset[str] = frozenset(
-    {"sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"}
+    {"sh", "bash", "zsh", "dash", "ksh", "ash", "busybox", "flock"}
 )
+
+#: Programs whose FIRST non-flag operand is a bare SHELL command STRING they run via
+#: ``sh -c`` -- NO ``-c`` flag precedes it (``watch 'rm -rf "$HOME"'`` runs the
+#: quoted command through a shell). Their operand is surfaced as an executed shell
+#: payload too (GPT 6.1). Kept to a small fixed list; a wrapper that takes a COMMAND
+#: (``timeout``/``nice``/``nohup``/``env``/``sudo``) is handled by the executor
+#: denylist in ``_rm_targets_in_argv`` instead and is NOT listed here.
+_RM_COMMAND_STRING_WRAPPERS: frozenset[str] = frozenset({"watch"})
 
 
 def _rm_shell_c_data_payloads(tokens: "list[str]") -> "frozenset[str]":
@@ -1466,7 +1968,7 @@ def _rm_shell_c_data_payloads(tokens: "list[str]") -> "frozenset[str]":
 
     ``echo bash -c 'rm -rf "/"'`` / ``cat sh -c '…'`` PRINT the shell command —
     ``bash``/``sh`` is an ARGUMENT of the data consumer (``echo``/``cat``), so the
-    ``-c`` string is never run (Design Review: base allowed this as a mention; the
+    ``-c`` string is never run (base allowed this as a mention; the
     payload walk otherwise descends it into a frame and refuses it as a wipe).
     Returns the raw ``-c`` argument of every such mention so the caller can skip
     the descended frame it would produce. An EXECUTED shell (``bash -c '…'`` at
@@ -1477,6 +1979,18 @@ def _rm_shell_c_data_payloads(tokens: "list[str]") -> "frozenset[str]":
     disqualified = _data_consumer_command_disqualified(tokens)
     data: set[str] = set()
     n = len(tokens)
+    # Precompute, in ONE left-to-right pass, the next command boundary at or after
+    # each position. The per-shell-token ``-c`` search then scans only within its
+    # own command segment instead of rescanning every later token to the end --
+    # ``echo sh sh … rm`` (thousands of ``sh`` words in ONE segment) made the old
+    # inner loop O(n x n) and stalled the gate ~27s past the watchdog.
+    next_boundary = [n] * (n + 1)
+    nb = n
+    for p in range(n - 1, -1, -1):
+        if _rm_token_ends_argv(tokens[p]):
+            nb = p
+        next_boundary[p] = nb
+    scanned_through = 0
     for i, tok in enumerate(tokens):
         if _program_basename(tok) not in _RM_SHELL_C_PROGRAMS:
             continue
@@ -1484,12 +1998,20 @@ def _rm_shell_c_data_payloads(tokens: "list[str]") -> "frozenset[str]":
         # (``echo``/``cat`` …), not when it is the command being run.
         if not _data_consumer_exempt(i, tok, programs, tokens, command_disqualified=disqualified):
             continue
-        j = i + 1
-        while j < n and not _ends_argv(tokens[j]):
+        # Scan THIS command's segment for the ``-c`` whose next token is the printed
+        # payload -- but only ONCE per segment. A segment already scanned (because an
+        # earlier exempt shell word in it was visited) is skipped, so a long run of
+        # shell words in one segment (``echo sh sh … rm``) costs O(segment) total,
+        # not O(segment) per word (the old per-word rescan stalled the
+        # gate ~27s past the watchdog).
+        seg_end = next_boundary[i]
+        if i < scanned_through:
+            continue
+        scanned_through = seg_end
+        for j in range(i + 1, seg_end):
             if tokens[j] == "-c" and j + 1 < n:
                 data.add(_strip_outer_quotes(tokens[j + 1]))
                 break
-            j += 1
     return frozenset(data)
 
 
@@ -1501,13 +2023,13 @@ def _rm_shell_c_executed_payloads(tokens: "list[str]") -> "frozenset[str]":
     shell RUNS the payload, so ``$HOME``/``~`` inside it is expanded by that child
     shell regardless of the OUTER quotes that merely delimit the payload. The home
     liveness check must read the payload's OWN quote state, not the enclosing
-    command's (GPT 6.1 F2, security-class): ``"$HOME"`` inside the payload is live
+    command's: ``"$HOME"`` inside the payload is live
     even though the whole payload sits in the outer ``'…'``. A shell that is a data
     consumer's operand (``echo bash -c '…'``) is NOT executed and is excluded.
 
     Recurses through NESTED payloads to a bounded depth: ``bash -c 'bash -c "rm
     -fr ~"'`` runs the inner ``rm -fr ~`` two levels down, so the inner payload
-    must be surfaced for the liveness check too (GPT 6.1 F2). Recursion is capped
+    must be surfaced for the liveness check too. Recursion is capped
     at ``_RM_DESCENT_BUDGET`` payloads so a pathological nest cannot spin.
     """
     out: set[str] = set()
@@ -1524,17 +2046,33 @@ def _rm_shell_c_executed_payloads(tokens: "list[str]") -> "frozenset[str]":
         # an argv-end, so the per-token search is O(1). A repeated non-``-c`` shell
         # operand (``'sh rm ' + 'sh ' * 6600``) otherwise rescans the same suffix
         # per token -- O(tokens²), ~19s on the synchronous gate, past the 25s
-        # watchdog (GPT 6.1 security-class crash/data-loss fix, same shape as
+        # watchdog (same shape as
         # ``_rm_targets_in_shell_c``).
         next_c = [-1] * (n + 1)
         for p in range(n - 1, -1, -1):
-            if _ends_argv(cur[p]):
+            if _rm_token_ends_argv(cur[p]):
                 next_c[p] = -1
             elif cur[p] == "-c":
                 next_c[p] = p
             else:
                 next_c[p] = next_c[p + 1]
         for i, tok in enumerate(cur):
+            # A command-string wrapper (``watch 'rm -rf "$HOME"'``) runs its FIRST
+            # non-flag operand through a shell -- surface that operand as a payload.
+            # Only at program position (``i == 0`` or after a command boundary), so
+            # a ``watch`` MENTIONED as data is not treated as executing.
+            if _program_basename(tok) in _RM_COMMAND_STRING_WRAPPERS and (
+                i == 0 or (i > 0 and _rm_token_ends_argv(cur[i - 1]))
+            ):
+                k = i + 1
+                while k < n and cur[k].startswith("-"):
+                    k += 1
+                if k < n and not _rm_token_ends_argv(cur[k]):
+                    payload = _strip_outer_quotes(cur[k])
+                    out.add(payload)
+                    if payload not in seen:
+                        seen.add(payload)
+                        worklist.append(_split_shell_words(payload))
             if _program_basename(tok) not in _RM_SHELL_C_PROGRAMS:
                 continue
             # Skip the DATA case (printed mention); keep only an executed shell.
@@ -1575,10 +2113,10 @@ def _rm_targets_in_shell_c(
     # ``-c`` search into an O(1) read, so a repeated non-``-c`` shell operand
     # (``'sh rm ' + 'sh ' * 6600``) does not rescan the same suffix per token —
     # which would be O(tokens²), ~19s on the synchronous gate and past the 25s
-    # watchdog (GPT 6.1 security-class crash/data-loss).
+    # watchdog.
     next_c = [-1] * (n + 1)
     for p in range(n - 1, -1, -1):
-        if _ends_argv(tokens[p]):
+        if _rm_token_ends_argv(tokens[p]):
             next_c[p] = -1
         elif tokens[p] == "-c":
             next_c[p] = p
@@ -1597,7 +2135,7 @@ def _rm_targets_in_shell_c(
             if j != -1 and j + 1 < n:
                 span = []
                 k = j + 1
-                while k < n and not _ends_argv(tokens[k]):
+                while k < n and not _rm_token_ends_argv(tokens[k]):
                     span.append(tokens[k])
                     k += 1
                 if span:
@@ -1605,7 +2143,7 @@ def _rm_targets_in_shell_c(
                     # are positional args bound to ``$0``/``$1``/… (``sh -c
                     # '…rm -rf .cache' sh "$HOME"`` — ``$HOME`` is ``$1``, not an
                     # ``rm`` operand), so joining them wrongly refused a legit
-                    # cache clean (Security Scope). ONE descent per span (Opus).
+                    # cache clean. ONE descent per span.
                     if _budget[0] > 0:
                         _budget[0] -= 1
                         payload = _rm_deescape_unquoted_backslashes(span[0])
@@ -1617,7 +2155,7 @@ def _rm_targets_in_shell_c(
                 # Advance PAST the consumed ``-c`` span, not by one — a chain of
                 # ``sh -c`` tokens (``"sh -c " * 1000``) would otherwise re-scan
                 # the span to the end for every ``sh``, O(spans²) and minutes on
-                # the synchronous gate (Opus, security-class perf).
+                # the synchronous gate.
                 advance = max(advance, k - i)
         i += advance
     return frozenset(found)
@@ -1639,7 +2177,7 @@ def _rm_overflow_span_targets(tokens: "list[str]", start: int) -> "frozenset[str
     out: set[str] = set()
     j = start + 1
     n = len(tokens)
-    while j < n and not _ends_argv(tokens[j]):
+    while j < n and not _rm_token_ends_argv(tokens[j]):
         tok = tokens[j]
         j += 1
         if tok.startswith("-"):
@@ -1655,10 +2193,26 @@ def _rm_overflow_span_targets(tokens: "list[str]", start: int) -> "frozenset[str
                 out.add("root")
             if _RM_HOME_ITSELF_RE.fullmatch(cand):
                 out.add("home")
+        # Preserve the EXPANDED-home equality the full classifier applies: an operand
+        # that is a literal absolute path equal to the real home (``rm -fr
+        # /home/alice`` where ``$HOME`` is ``/home/alice``) carries no ``~``/``$HOME``
+        # marker, so the itself-matchers above miss it, yet it is a real home wipe.
+        # Fold separators + lowercase + home-itself tail strip, as
+        # ``_rm_absolute_home_operand`` does.
+        if "home" not in out:
+            home_real = _rm_expanded_home_path()
+            if home_real and (
+                _rm_strip_home_itself_tail(stripped.replace("\\", "/").lower()) == home_real
+                or _rm_strip_home_itself_tail(
+                    _rm_normalize_dot_segments(stripped).replace("\\", "/").lower()
+                )
+                == home_real
+            ):
+                out.add("home")
         # A BRACE operand can expand to the root/home dir ITSELF via an empty or
         # ``/``/``~`` member (``"$HOME"/{,.cache}`` -> ``$HOME`` + ``$HOME/.cache``;
         # ``/{,bin}`` -> ``/``), which the itself-matchers above miss on the
-        # unexpanded token (GPT 6.1 F4). Use the SAME bounded brace test the
+        # unexpanded token. Use the SAME bounded brace test the
         # non-overflow path uses -- a numeric/char RANGE and a non-root frame stay
         # ALLOWED, so a descendant bulk cleanup (``rm -fr build{0..69}``) is not
         # newly refused. The class comes from the residual frame's spelling.
@@ -1682,25 +2236,96 @@ def _rm_overflow_span_targets(tokens: "list[str]", start: int) -> "frozenset[str
     return frozenset(out)
 
 
+def _rm_frame_overflow_targets(
+    tokens: "list[str]", *, raw_source: "str | None" = None
+) -> "frozenset[str]":
+    """A CHEAP, BOUNDED, quote-normalized exact root/home scan of ONE frame, used
+    when the frame-walk's shared token budget is exhausted.
+
+    Past the budget the frame walk must NOT silently skip a frame -- a padded line
+    of many substitutions each with many operands exhausts the budget before the
+    wipe's frame, and the whole-text deny-net regex does not catch a split spelling
+    like ``r''m -fr ~``. This runs ONE linear
+    pass per frame with NO brace/dot/candidate/recursion machinery: it splits glued
+    command boundaries, finds each EXECUTED recursive-force ``rm`` span (its program
+    word read on the de-quoted spelling, so ``r''m`` is recognised), and applies the
+    cheap :func:`_rm_overflow_span_targets` exact-target test. O(frame tokens), so
+    it cannot be exhausted -- the EXPENSIVE full classifier stays budget-gated.
+
+    Quote boundary: the command-boundary split and the span scan run over the
+    QUOTE-PRESERVING argv so an operand keeps its literal punctuation -- only the
+    program and flag WORDS are de-quoted, and only to recognise them (``r''m`` ->
+    ``rm``). A decoded view strips an operand's surrounding quotes, so a literal
+    ``'a;b'`` filename would collapse to ``a;b`` and the glued-boundary split would
+    read the ``;`` as a command boundary, dropping the trailing ``~`` and failing a
+    home wipe open. When *raw_source* is given it is re-split (quotes intact) and
+    used instead of the de-quoted *tokens*; the program-word match de-quotes each
+    word individually, so a split spelling is still caught."""
+    toks = _rm_split_glued_boundaries(
+        _split_shell_words(raw_source) if raw_source is not None else tokens
+    )
+    programs = _argv_programs(toks)
+    out: set[str] = set()
+    expect_program = True
+    program_word_at = -1
+    for i, token in enumerate(toks):
+        is_program_word = expect_program
+        if is_program_word:
+            expect_program = False
+            program_word_at = i
+        if _rm_token_ends_argv(token) or token.endswith("&"):
+            expect_program = True
+        # Match ``rm`` on the DE-QUOTED spelling so ``r''m`` / ``r""m`` is caught.
+        if _program_basename(_rm_strip_all_quotes(token)) != "rm":
+            continue
+        # Executed iff ``rm`` leads its own command, is a multi-call dispatcher's
+        # applet (``busybox rm``), or its parent is not a data consumer -- mirrors
+        # the full classifier's executability test, cheaply.
+        executed = (
+            is_program_word
+            or (
+                program_word_at >= 0
+                and program_word_at == i - 1
+                and _program_basename(programs[program_word_at]) in _RM_APPLET_DISPATCHERS
+            )
+            or (
+                program_word_at >= 0
+                and program_word_at != i
+                and _program_basename(programs[program_word_at]) not in _DATA_CONSUMER_PROGRAMS
+            )
+        )
+        if not executed:
+            continue
+        if not _rm_span_is_recursive_force(toks, i):
+            continue
+        out |= _rm_overflow_span_targets(toks, i)
+        if {"root", "home"} <= out:
+            break
+    return frozenset(out)
+
+
 def _rm_split_glued_boundaries(tokens: "list[str]") -> "list[str]":
     """Split tokens on glued, UNESCAPED, UNQUOTED command boundaries.
 
     ``_split_shell_words`` keeps a glued separator fused with its neighbours, so
     ``rm -fr ./build;rm -fr ~`` arrives as ``[..., './build;rm', ...]`` and the
     main loop's tail-only ``_ends_argv`` never sees the ``;`` — the second
-    command hides and its wipe fails open (GPT 6.1 :1909). Rewrite each such
+    command hides and its wipe fails open. Rewrite each such
     token into its operand fragments plus a standalone boundary token
     (``['./build', ';', 'rm']``) so the main loop resets ``expect_program`` at the
     boundary and attributes the following command correctly.
 
     A boundary that is backslash-escaped (``a\\;b``) or inside shell quotes
     (``';'`` / ``";"``) is NOT a separator — a quoted ``;`` is a literal filename
-    (``rm -rf ';' /`` deletes a file named ``;``, then root). The scan tracks
-    single/double quote state and only splits on a boundary at quote depth zero.
+    (``rm -rf ';' /`` deletes a file named ``;``, then root). Routes through the
+    single :func:`_rm_unescaped_boundary` scan with ``treat_subshell_closer=False``
+    so a ``)`` closing a ``$(…)`` is left to the depth-tracking classifier, while a
+    redirection ``&`` (``2>&1``) is correctly not split — the same boundary rules
+    the span scan uses.
     """
     out: "list[str]" = []
     for tok in tokens:
-        if not tok or _rm_boundary_outside_quotes(tok) is None:
+        if not tok or _rm_unescaped_boundary(tok, treat_subshell_closer=False) is None:
             out.append(tok)
             continue
         # Walk the token, carving out each unquoted, unescaped boundary as its own
@@ -1714,7 +2339,7 @@ def _rm_split_glued_boundaries(tokens: "list[str]") -> "list[str]":
             if guard > len(tok) + 2:
                 out.append(rest)
                 break
-            pos = _rm_boundary_outside_quotes(rest)
+            pos = _rm_unescaped_boundary(rest, treat_subshell_closer=False)
             if pos is None:
                 out.append(rest)
                 break
@@ -1725,21 +2350,6 @@ def _rm_split_glued_boundaries(tokens: "list[str]") -> "list[str]":
             out.append(sep)
             rest = rest[pos + 1 :]
     return out
-
-
-def _rm_boundary_outside_quotes(operand: str) -> "int | None":
-    """Index of the first command-sequencing operator (``; & | \\n``) that is
-    neither backslash-escaped NOR inside shell quotes, or ``None``.
-
-    Unlike :func:`_rm_unescaped_boundary` this is QUOTE-aware (a ``';'`` literal is
-    skipped) and does NOT treat ``)`` as a boundary (the subshell closer is left to
-    the depth-tracking classifier). Used only to split a glued boundary before the
-    main token scan.
-    """
-    for step in _iter_shell_chars(operand):
-        if step.active and step.char in ";&|\n":
-            return step.offset
-    return None
 
 
 def _rm_targets_in_argv(
@@ -1765,8 +2375,7 @@ def _rm_targets_in_argv(
     (``rm -rf /etc``, ``rm -rf ~/.ssh``) is NOT denied by this structural pass;
     base's descendant coverage is reproduced by the frame-text pin (``rm -rf /.*``
     / ``rm -rf ~.*``), so only a descendant base's contiguous ``rm -rf `` text
-    matched is denied while a widened spelling (``rm -fr /tmp/x``) stays allowed
-    (Security Scope).
+    matched is denied while a widened spelling (``rm -fr /tmp/x``) stays allowed.
 
     ``strip_quotes`` peels surrounding SHELL quotes — True for the raw split
     (``"$HOME"`` -> ``$HOME``), False for the decoded view where a surrounding
@@ -1775,7 +2384,7 @@ def _rm_targets_in_argv(
     if not tokens:
         return frozenset()
     # ------------------------------------------------------------------
-    # F1 preprocessing: split glued command boundaries (GPT 6.1 :1909).
+    # F1 preprocessing: split glued command boundaries.
     # ``_split_shell_words`` can produce tokens like ``./build;rm`` where an
     # unquoted ``;`` (or ``&`` / ``|``) is fused with its neighbours.  The main
     # loop's ``_ends_argv`` only checks a token's TAIL, so the glued boundary is
@@ -1804,21 +2413,27 @@ def _rm_targets_in_argv(
     #: argument (its applet) can be recognised: ``busybox rm -rf /`` runs ``rm``.
     program_word_at = -1
     #: How many ``rm`` spans this argv has structurally classified. Bounds the
-    #: per-``rm`` suffix re-scan to keep a ``rm``-padded argv linear (GPT 6.1 F2);
+    #: per-``rm`` suffix re-scan to keep a ``rm``-padded argv linear;
     #: a wipe past the cap is still caught by the whole-text deny-net regex.
     rm_spans_classified = 0
     #: Per-SPAN cache of the recursive-force verdict, keyed on the span's
-    #: program-word index, so a flagless ``rm`` flood costs O(1) per token (GPT 6.1
-    #: F3).
+    #: program-word index, so a flagless ``rm`` flood costs O(1) per token.
     span_start_at = -2
     span_is_rf = False
-    #: Per-SPAN cache of the overflow root/home-shape verdict (GPT 6.1 F1), keyed on
+    #: Per-SPAN cache of the overflow root/home-shape verdict, keyed on
     #: the same span program-word index. The overflow scan reads the WHOLE span's
     #: operands, so it is a property of the span, not of the operand index it is
     #: called at — computing it once per span keeps a bare-``rm`` flood past the cap
     #: (``sudo rm -fr rm rm …``) at O(1) per operand instead of rescanning the span
     #: suffix for every operand named ``rm`` (O(n²), past the gateway watchdog).
     span_overflow_targets: frozenset[str] = frozenset()
+    #: Cumulative bytes of brace members materialized across every span so far. A
+    #: single word AT the per-word count cap can still carry large members, and the
+    #: span loop re-materializes a word's members once per span, so this is the only
+    #: bound on the TOTAL expansion work. Once it crosses
+    #: ``_RM_EXPANSION_BYTE_BUDGET`` no further span materializes members: each falls
+    #: back to the cheap ``span_overflow_targets`` shape verdict instead.
+    expansion_bytes = 0
     for i, token in enumerate(tokens):
         is_program_word = (
             expect_program and bool(token) and not _shell_normalizer.ENV_ASSIGNMENT_RE.match(token)
@@ -1832,7 +2447,7 @@ def _rm_targets_in_argv(
         # commands, the ``rm`` executed. ``_ends_argv`` catches glued ``|``/``;`` but
         # not ``&``, and a standalone ``&`` is already covered; a ``2>&1`` ends in
         # ``1`` not ``&``, so it is not mistaken for a boundary.
-        if _ends_argv(token) or token.endswith("&"):
+        if _rm_token_ends_argv(token) or token.endswith("&"):
             expect_program = True
         if _program_basename(token) != "rm":
             continue
@@ -1868,14 +2483,14 @@ def _rm_targets_in_argv(
         # A ``rm`` that is a trailing OPERAND of a filesystem-MOVER (``env rm -fr rm
         # rm`` runs ``rm -fr`` on operands ``rm rm``) is a path. A mover under an
         # exec wrapper is attributed to the wrapper, so skip the operand when it is
-        # NOT the span's program word and the effective command is a mover (GPT 6.1
-        # F2/F3). A wrapper-reached EXECUTED ``rm`` (``ssh host rm -rf /tmp/x``) still
+        # NOT the span's program word and the effective command is a mover.
+        # A wrapper-reached EXECUTED ``rm`` (``ssh host rm -rf /tmp/x``) still
         # classifies.
         if not (starts_command or dispatched_applet):
             effective_program = _rm_effective_span_program(programs, tokens, i)
             if effective_program in _RM_MOVER_PROGRAMS:
                 continue
-        # Bound the per-``rm`` suffix scans (GPT 6.1 F3): a flagless ``rm`` flood
+        # Bound the per-``rm`` suffix scans: a flagless ``rm`` flood
         # (``setsid true`` + 2,500 bare ``rm`` args) otherwise pays an O(span) scan
         # per token, O(n²), past the gateway watchdog. The recursive-force verdict is
         # a property of the SPAN, so compute it ONCE per span and reuse it; and a
@@ -1885,7 +2500,7 @@ def _rm_targets_in_argv(
             span_start_at = program_word_at
             span_is_rf = _rm_span_is_recursive_force(tokens, i)
             # Compute the overflow root/home-shape verdict ONCE per span, here at the
-            # span's program word (GPT 6.1 F1). It reads the whole span's operands, so
+            # span's program word. It reads the whole span's operands, so
             # it does not depend on which operand ``i`` reached the overflow branch;
             # caching it stops the quadratic rescan a bare-``rm`` flood would cause.
             span_overflow_targets = _rm_overflow_span_targets(tokens, i)
@@ -1895,24 +2510,36 @@ def _rm_targets_in_argv(
             # Past the per-span classification cap, do NOT blanket-deny: a long bulk
             # cleanup of recursive-force rm on DESCENDANTS (``rm -fr build0 ; … ;
             # rm -fr build69``) is legit and base allowed it, so failing closed to
-            # root+home newly refused it (Security Scope / Opus 5.5). Instead run a
+            # root+home newly refused it. Instead run a
             # CHEAP, bounded root/home-SHAPE test on this overflow span's operands
             # (raw regex + prefix, no brace/dot machinery): fail closed only for the
             # class actually targeted. The verdict is a per-SPAN property computed
             # once at the span's program word (``span_overflow_targets``), so each
-            # operand past the cap costs O(1) here, not an O(span) rescan (GPT 6.1
-            # F1 — a bare-``rm`` flood ``sudo rm -fr rm rm …`` was otherwise O(n²),
+            # operand past the cap costs O(1) here, not an O(span) rescan (a
+            # bare-``rm`` flood ``sudo rm -fr rm rm …`` was otherwise O(n²),
             # 38s past the gateway watchdog).
             found |= span_overflow_targets
             if {"root", "home"} <= found:
                 break
             continue
         rm_spans_classified += 1
+        # Cumulative brace-materialization budget: once the total expanded
+        # bytes across prior spans crossed the ceiling, do NOT run the full
+        # structural pass for this span (its ``for arg in expanded_args`` walk is
+        # what the materialized bytes feed). Fall back to the same CHEAP per-span
+        # root/home-shape verdict the span-count overflow uses — it reads the raw
+        # operand tokens once with no brace materialization, so it is bounded and
+        # does not newly refuse a legitimate descendant cleanup.
+        if expansion_bytes > _RM_EXPANSION_BYTE_BUDGET:
+            found |= span_overflow_targets
+            if {"root", "home"} <= found:
+                break
+            continue
         # STRUCTURAL classification (below) denies the EXACT root/home target for
         # ANY ``rm`` — direct, dispatcher applet, or EXEC-WRAPPER reached. base's
         # DESCENDANT coverage (``rm -rf /etc``, ``rm -rf ~/.ssh``) is reproduced by
         # the base-contiguous-literal pin, so a descendant base matched is denied
-        # while a WIDENED spelling (``rm -fr /tmp/x``) stays allowed (Security Scope).
+        # while a WIDENED spelling (``rm -fr /tmp/x``) stays allowed.
         has_rec = has_force = has_npr = False
         end_of_options = False
         depth = 0
@@ -1927,59 +2554,107 @@ def _rm_targets_in_argv(
         span_has_live_home = False
         # Base ran its whole-line literal against the QUOTE-NORMALIZED re-join, so
         # ``rm -rf "/etc"`` / ``rm "-rf" /etc`` denied on base; the raw pin misses
-        # them (Opus). Reproduce STRUCTURALLY, raw view only: ``$HOME`` stays literal
+        # them. Reproduce STRUCTURALLY, raw view only: ``$HOME`` stays literal
         # so base's contiguity still excludes ``$HOME``-descendants.
         # ``rm {--recursive,--force,--no-preserve-root} {/,/tmp}`` reaches the floor
         # with brace GROUPS as single tokens matching no flag/operand, yet bash
-        # expands each word and wipes ``/`` (GPT F1). Expand every token's
+        # expands each word and wipes ``/``. Expand every token's
         # statically-decidable alternation members BEFORE flag/operand parsing;
         # non-brace expands to itself. Bounded by ``_RM_BRACE_EXPANSION_CAP``.
         expanded_args: list[str] = []
+        #: Count of RAW operand tokens (argv words BEFORE brace expansion). The
+        #: operand cap targets a bare-``rm`` flood of many SEPARATE operands, not a
+        #: single brace word that legitimately expands to many descendant members
+        #: (``rm -rf {1..70}{,.log}`` is ONE raw operand -- a legit numbered cleanup
+        #: the full classifier allows; capping on expanded members wrongly forced it
+        #: into the fail-closed shape verdict).
+        raw_operand_count = 0
+        #: Set when this span's brace materialization crossed the cumulative byte
+        #: budget mid-expansion: the structural pass below is then skipped
+        #: and the cheap per-span shape verdict is used instead.
+        brace_budget_exhausted = False
         for raw_arg in tokens[i + 1 :]:
             # An unquoted word starting with ``#`` opens a shell COMMENT — discarded
             # with the rest of the line, never an ``rm`` operand (``rm -rf dist #
-            # remove /`` deletes ``dist``; Opus). A quoted/glued ``#`` is literal.
+            # remove /`` deletes ``dist``). A quoted/glued ``#`` is literal.
             if strip_quotes and raw_arg.startswith("#"):
                 break
+            raw_operand_count += 1
             # Expand this word's brace members via the shared ``_brace_expansions``.
             # It returns ``[word]`` for a non-brace / single-member word and ``None``
             # on a product past the shared cap; on overflow keep the raw word (the
             # per-span ``brace_overflow`` fail-closed below, plus the deny-net regex,
             # still catch a catastrophic member).
             members = _brace_expansions(raw_arg)
-            expanded_args.extend(members if members else [raw_arg])
+            produced = members if members else [raw_arg]
+            # Charge the materialized members against the cumulative byte budget.
+            # A word at the per-word count cap can still carry 256 x
+            # ~16 KB members, and this loop runs once per span, so without a byte
+            # bound a 64-span chain costs ~116 CPU s past the gate watchdog. Once the
+            # running total crosses the ceiling, stop expanding this span and fall
+            # back to the cheap shape verdict below — never materialize the overflow.
+            expansion_bytes += sum(len(w) for w in produced)
+            if expansion_bytes > _RM_EXPANSION_BYTE_BUDGET:
+                brace_budget_exhausted = True
+                break
+            expanded_args.extend(produced)
             # Stop at THIS ``rm``'s command boundary — an unescaped ``;``/``&``/
             # ``|``/newline ends the command, so a later command's operands are not
-            # brace-expanded (``rm a ;`` + brace blobs is O(commands × operands); GPT
-            # 6.1 perf). A separator bare only from a peeled quote (``';'``) is a
+            # brace-expanded (``rm a ;`` + brace blobs is O(commands × operands).
+            # A separator bare only from a peeled quote (``';'``) is a
             # literal — gate on ``not did_peel`` (``rm -rf ';' /`` deletes root).
             if strip_quotes:
                 # A control character that is bare only BECAUSE a quote pair was
                 # peeled was QUOTED in the source (``';'`` is a filename), so it is
-                # not a boundary: ``rm -rf ';' /`` really deletes root (Opus).
+                # not a boundary: ``rm -rf ';' /`` really deletes root.
                 _boundary_arg = _strip_outer_quotes(raw_arg)
                 _boundary_did_peel = _boundary_arg != raw_arg
                 if not _boundary_did_peel and _rm_unescaped_boundary(_boundary_arg) is not None:
                     break
+        if brace_budget_exhausted:
+            # This span's expansion crossed the cumulative byte ceiling: do not run
+            # the structural pass over a partially-materialized operand list (it
+            # would be both unbounded-costly on the next span and incomplete here).
+            # Use the cheap per-span root/home-shape verdict, computed from the raw
+            # operand tokens with no materialization.
+            found |= span_overflow_targets
+            if {"root", "home"} <= found:
+                break
+            continue
+        # Cap the OPERAND COUNT the structural pass walks for one span. The
+        # structural classification below builds a candidate set and runs several
+        # ``any(... for op in candidates)`` passes, each O(operands), so a single
+        # span with hundreds of operands (a bare-``rm`` flood ``sudo rm -fr rm rm …
+        # rm`` with 800 words) is O(operands) per pass and ~22s under coverage
+        # instrumentation. Past the cap use the cheap per-span
+        # root/home-shape verdict (raw regex + prefix, no candidate/brace/dot
+        # machinery) -- it reads the operands once and classifies the class actually
+        # targeted, so a real wipe past the cap still denies and a bulk descendant
+        # cleanup still allows.
+        if raw_operand_count > _RM_SPAN_OPERAND_CAP:
+            found |= span_overflow_targets
+            if {"root", "home"} <= found:
+                break
+            continue
         for arg in expanded_args:
             operand = _strip_outer_quotes(arg) if strip_quotes else arg
             quote_peeled = operand != arg
             # Quoting a flag does NOT stop GNU ``rm`` option parsing — bash strips
             # the quotes, so ``rm '-rf' ~`` / ``rm "-rf" ~`` / ``rm -r''f ~`` / ``rm
-            # \-rf ~`` all reach ``rm`` as ``-rf`` (Opus). Test the flag predicates
+            # \-rf ~`` all reach ``rm`` as ``-rf``. Test the flag predicates
             # on the FULLY de-quoted spelling; the raw ``arg`` keeps its quotes and
             # would be mis-read as an operand, failing open on the wipe.
             flag_tok = _rm_strip_all_quotes(arg) if strip_quotes else arg
             # A glued operator (``/;reboot``) leaves the real operand before it;
             # classify that head and end the argv at the boundary. A separator bare
             # only from a peeled quote (``';'``) is a literal, not a boundary, so the
-            # split is suppressed (Opus: ``rm -rf ';' /``), as for a backslash-escaped
+            # split is suppressed (e.g. ``rm -rf ';' /``), as for a backslash-escaped
             # operator. Raw view only.
             glued_boundary = False
-            if strip_quotes and not quote_peeled and depth + _substitution_depth_delta(arg) <= 0:
+            if strip_quotes and not quote_peeled and depth + _rm_substitution_depth_delta(arg) <= 0:
                 operand, glued_boundary = _rm_operand_before_boundary(operand)
             # A glued separator can split a FLAG from its terminator (``-fr;``): the
-            # prefix is the flag, not an operand (GPT 6.1 F1). Re-read the glued
+            # prefix is the flag, not an operand. Re-read the glued
             # prefix as a flag so ``rm ~ -fr; true`` is recognised recursive-force.
             glued_flag = _rm_strip_all_quotes(operand) if glued_boundary else ""
             if flag_tok == "--" and not end_of_options:
@@ -2026,37 +2701,41 @@ def _rm_targets_in_argv(
             # A shell-ELIDED empty word (``rm "" -rf /``) contributes no flag/
             # operand — bash expands ``""`` to nothing, so base never saw it and the
             # ``rm -rf /`` stayed contiguous.
-            depth += _substitution_depth_delta(arg)
+            depth += _rm_substitution_depth_delta(arg)
             # The rm span started at depth 0 (relative to its own program word). A
             # token whose delta drops depth BELOW 0 is the ``)`` / closer of the
             # substitution that HOLDS this rm (``ls $(rm -rf ./build) ~``): the rm
             # argv ends there, so the OUTER command's operands (the trailing ``~``)
-            # are not miscounted as rm targets (Opus 5.5 FP; base allowed both).
+            # are not miscounted as rm targets (base allowed both).
             if depth < 0:
                 break
             # A quoted-``;`` (``';'``) or backslash-ESCAPED operator (``a\;b``) is a
-            # literal filename, not a terminator — ``_ends_argv`` on the raw ``arg``
-            # would stop the argv before a later ``/`` (Opus: ``rm -rf ';' /``). The
-            # raw-view terminator fires only on an UNESCAPED, unpeeled operator; the
-            # decoded view ends on its own bare terminator.
+            # literal filename, not a terminator — a non-quote-aware ``_ends_argv``
+            # on the raw ``arg`` would stop the argv before a later ``/`` or ``~``
+            # (e.g. ``rm -rf ';' /``, ``r''m -fr 'a;b' ~``). Both the raw and the
+            # decoded view route the boundary test through the SAME quote-aware
+            # helper so an operand keeps its literal punctuation; the raw view adds
+            # the unpeeled/unescaped guard a peeled quote would otherwise lose.
             if strip_quotes:
                 raw_terminates = (
-                    not quote_peeled and _ends_argv(arg) and _rm_unescaped_boundary(arg) is not None
+                    not quote_peeled
+                    and _rm_token_ends_argv(arg)
+                    and _rm_unescaped_boundary(arg) is not None
                 )
             else:
-                raw_terminates = _ends_argv(arg)
+                raw_terminates = _rm_token_ends_argv(arg)
             if depth <= 0 and (glued_boundary or raw_terminates):
                 break
         # STRUCTURAL classification denies the EXACT root/home target ITSELF in ANY
         # flag spelling. A DESCENDANT in a WIDENED spelling (``rm -fr /tmp/x``) is
-        # NOT denied here (base's whole-line literal never matched it; Security
-        # Scope). base's OWN ``rm -rf /``/``~`` descendant coverage is the LIVE
+        # NOT denied here (base's whole-line literal never matched it).
+        # base's OWN ``rm -rf /``/``~`` descendant coverage is the LIVE
         # whole-line deny-net regex, which already scans the raw command text.
         root_re, home_re = _RM_ROOT_ITSELF_RE, _RM_HOME_ITSELF_RE
         # Classify each operand AND its dot-normalized form (``/./``, ``/tmp/../``,
         # ``~/.`` resolve to root/home). On the RAW split also classify the fully
-        # de-quoted spelling so a PARTIALLY quoted ``"$HOME"/`` keeps its anchor
-        # (GPT security-class); NOT on the decoded view, where a decode-produced
+        # de-quoted spelling so a PARTIALLY quoted ``"$HOME"/`` keeps its anchor;
+        # NOT on the decoded view, where a decode-produced
         # quote is a literal filename char (``$'"/"'`` is a file ``/``, not root).
         candidates = list(operands) + [_rm_normalize_dot_segments(op) for op in operands]
         if strip_quotes:
@@ -2064,7 +2743,7 @@ def _rm_targets_in_argv(
             candidates += dequoted + [_rm_normalize_dot_segments(op) for op in dequoted]
         # A brace word (``{~,/x}``, ``/{,bin}``, ``$HOME/{,.cache}``) expands to
         # several operands and the exact matchers must see each, else the root/home
-        # member hides behind the un-expandable brace word (GPT). Expand every
+        # member hides behind the un-expandable brace word. Expand every
         # candidate via the shared ``_brace_expansions`` and classify each member +
         # its dot-normalized form; a non-brace / single-member word contributes
         # nothing extra. A product past the shared cap returns ``None`` — fail CLOSED
@@ -2080,7 +2759,7 @@ def _rm_targets_in_argv(
                 # empty or still root/home-rooted. A word with a non-root LITERAL
                 # prefix (``./bench-out/run-{1..500}``, ``/tmp/kc-shard-{000..511}``,
                 # ``out/{a,b}{1..99}``) can only expand to descendants, so a huge
-                # relative/descendant brace is NOT a catastrophic wipe (Security Scope).
+                # relative/descendant brace is NOT a catastrophic wipe.
                 if _rm_brace_word_could_be_catastrophic(op):
                     brace_overflow = True
                 continue
@@ -2091,12 +2770,12 @@ def _rm_targets_in_argv(
         home_excluded = home_single_quote_literals if not span_has_live_home else set()
         home_target = any(home_re.fullmatch(op) and op not in home_excluded for op in candidates)
         # ``x=$HOME; rm -rf "$x"`` — the decoded view substitutes ``$x`` to the
-        # EXPANDED home (no ``~``/``$HOME`` marker), matching neither matcher (GPT
-        # 5.6 F3). Classify an operand that IS the expanded home as ``home``, decoded
+        # EXPANDED home (no ``~``/``$HOME`` marker), matching neither matcher.
+        # Classify an operand that IS the expanded home as ``home``, decoded
         # view and the reconstructed-literal view alike: a literal absolute path that
         # IS the real home (``echo /home/alice | xargs rm -fr``) is the home dir
-        # whichever view rebuilt it (GPT 6.1). Fold separators + lowercase + ``/``+``*``
-        # tail strip (``expanduser`` native-case on Windows), else ``/*`` slip (Opus 5.5).
+        # whichever view rebuilt it. Fold separators + lowercase + ``/``+``*``
+        # tail strip (``expanduser`` native-case on Windows), else ``/*`` slip.
         if not home_target:
             home_real = _rm_expanded_home_path()
             if home_real and any(
@@ -2113,8 +2792,8 @@ def _rm_targets_in_argv(
         # whole-line deny-net regex, which scans the raw command text; the structural
         # path below denies the exact root/home target ITSELF in any flag spelling,
         # and a brace-overflow fails closed. A separate ``base_rf_descendant`` pin
-        # here only re-spelled the regex's descendant denial (First Principles:
-        # one mechanism, not two) -- the full suite stays green without it, so the
+        # here only re-spelled the regex's descendant denial
+        # (one mechanism, not two) -- the full suite stays green without it, so the
         # descendant case is left to the regex.
         if has_npr or (has_rec and has_force):
             if root_target or brace_overflow:

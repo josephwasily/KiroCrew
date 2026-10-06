@@ -261,9 +261,11 @@ _NETCAT_EXEC_PATTERN = r"(?<![\w.-])(?<!\w=)nc\s+-e"
 # with the argv-structural floor ``rm_floor._recursive_force_rm_targets`` wired
 # in ``security.is_denied``. The floor reads only the ``rm`` command's OWN argv
 # (flags in any position, the home/root spellings, glob-over-children
-# ``/*``/``~/*``, exec/command-string wrappers, ``sh -c`` payloads, xargs stdin)
-# and adds the STRUCTURAL flag-spelling coverage the two issues ask for. The
-# regex net catches a quoted payload the own-argv model cannot reach
+# ``/*``/``~/*``, exec/command-string wrappers, ``sh -c`` payloads) and adds the
+# STRUCTURAL flag-spelling coverage the two issues ask for. A root/home wipe
+# reached THROUGH an ``xargs`` pipeline is left to the base regex deny-net on the
+# whole text, exactly as main does — the floor does not reconstruct xargs stdin.
+# The regex net catches a quoted payload the own-argv model cannot reach
 # (``su -c "rm -rf /"``, ``eval``, ``trap``). The net's one false positive — a
 # ``grep``-family search that merely NAMES the literal — is narrowed by the
 # ``_DENY_EXCEPTIONS`` grep inert-search carve-out. The literal remains the
