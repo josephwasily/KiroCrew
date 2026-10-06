@@ -1648,8 +1648,30 @@ abstraction Slack uses, so one bot serves many parallel, topic-scoped sessions
   collapses **only** direct DMs into the `unified:{agent}` bucket — forum routes
   always keep the full per-Topic key, so no group Topic can share a session with
   a DM or another group.
+- **Private-chat Topics.** Telegram also carries `message_thread_id` in
+  a **1:1 private chat** once direct-message topics are enabled (per-bot in
+  @BotFather). A private chat (`chat_type == "private"`) carrying a truthy
+  `thread_id` folds to a third `chat_type`, `direct_topic`, keyed
+  `telegram:{agent}:direct_topic:{chat_id}:{thread_id}` (the chat_id equals the
+  user id); the threadless General topic keeps the byte-for-byte
+  `direct` DM key, so a user who never enables topics — and their pre-topic
+  history — is unchanged. `direct_topic` is **per-topic isolated and never
+  collapses** under `dm_scope=unified` (only `CHAT_TYPE_DIRECT` collapses), so
+  switching topic switches conversation. It is still a 1:1 DM, so the DM-only
+  **audience** guards (`/kirocrew dashboard`, the host-wide listings in
+  `_require_direct_chat`) treat it as private via `_is_private_route`; but it is
+  deliberately NOT given the owner-DM **session-control** exemption
+  (`session_control.owner_dm_refusal` stays `direct` + a single scope segment, a
+  predicate shared with Discord), the fail-safe default — a private topic can
+  hold a conversation without gaining host-wide session-control authority.
+  Outbound: `may_send_to`/`may_resume_from` authorize a threaded link whose
+  chat_id is an allow-listed **positive** user id (a private topic) on the DM
+  roster, so proactive sends (cron, subagent completions, monitor wakes) thread
+  into the topic; a **negative** supergroup chat_id with a thread still routes to
+  the fail-closed `forum_gate_outcome`.
 - **Per-Topic generation.** `ConversationState` is keyed on the same route, so
-  `/new`, idle/daily rotation and `/compact` are scoped to one Topic.
+  `/new`, idle/daily rotation and `/compact` are scoped to one Topic (group OR
+  private-chat).
 - **Gate — fail-closed AND Topic-scoped.** `forum_gate_outcome(chat_type,
   chat_id, message_thread_id, *, allow_forum, allowed_forum_chat_ids)` is the
   single predicate guarding **both** `TelegramTransport.receive` (frozen

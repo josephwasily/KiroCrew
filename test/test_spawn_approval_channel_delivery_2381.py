@@ -38,7 +38,11 @@ import pytest
 from test_telegram import _cfg, _dispatcher, _prime_live  # noqa: E402
 
 from kiro_crew.messaging import spawn_approval_delivery as seam
-from kiro_crew.messaging.link import CHAT_TYPE_FORUM, parse_session_key
+from kiro_crew.messaging.link import (
+    CHAT_TYPE_FORUM,
+    CHAT_TYPE_PRIVATE_TOPIC,
+    parse_session_key,
+)
 from kiro_crew.messaging.session_trust import (
     _trusted_sessions,
     clear_trusted_sessions,
@@ -759,6 +763,58 @@ class TestTheDestinationIsReauthorizedBeforeTheSend:
         assert cli.sent == []
         key = TelegramApprovalDecider.key(session_key, "spawn:abc")
         assert key not in TelegramApprovalDecider._NONCES
+
+    @pytest.mark.usefixtures("_press_lands_inside_the_window")
+    def test_a_private_topic_posts_through_the_roster_not_the_forum_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A private-chat forum Topic carries a thread, but its chat_id IS the
+        # peer's positive user id. The roster admits it exactly as a threadless
+        # DM; the supergroup forum gate (empty allow-list here) must NOT be the
+        # thing consulted, or the prompt would never post into the owner's own
+        # topic.
+        chat_id, thread = 7, 42
+        d, cli, _sess = _dispatcher({chat_id})
+        empty_forum = _cfg(allow_forum=False, allowed_forum_chat_ids=[])
+        _prime_live(empty_forum)
+        monkeypatch.setattr(d, "_live_cfg", lambda: empty_forum)
+        session_key = d._session_key((CHAT_TYPE_PRIVATE_TOPIC, f"{chat_id}:{thread}"))
+        parsed = parse_session_key(session_key)
+        assert parsed is not None and parsed.chat_type == CHAT_TYPE_PRIVATE_TOPIC
+
+        async def _go() -> bool | None:
+            task = asyncio.ensure_future(
+                d.deliver_spawn_approval("spawn:abc", "spawn_run(build)", session_key)
+            )
+            for _ in range(50):
+                if cli.sent:
+                    break
+                await asyncio.sleep(0.01)
+            # The prompt threaded into the private topic it came from, not the
+            # chat root -- proof the roster admitted it despite the empty forum
+            # allow-list.
+            assert cli.send_threads == [thread]
+            key = TelegramApprovalDecider.key(session_key, "spawn:abc")
+            for _ in range(50):
+                if key in TelegramApprovalDecider._REGISTRY:
+                    break
+                await asyncio.sleep(0.01)
+            nonce = TelegramApprovalDecider._NONCES[key]
+            cb = SimpleNamespace(
+                callback_query_id="q1",
+                user_id=chat_id,
+                chat_id=chat_id,
+                message_id=100,
+                data=f"a:spawn:abc:{nonce}:1",
+                label="",
+                chat_type="private",
+                message_thread_id=thread,
+            )
+            await d.on_callback(cb)
+            return await task
+
+        assert asyncio.run(_go()) is True
+        assert len(cli.sent) == 1
 
     def test_a_transport_egress_denial_gets_no_prompt(self) -> None:
         # The roster still holds the peer, so ONLY the transport's own

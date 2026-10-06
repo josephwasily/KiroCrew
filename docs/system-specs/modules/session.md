@@ -2666,8 +2666,12 @@ gen, dm_scope)`:
 - **Shape** (channel-first): `{channel}:{agent}:{chatType}:{user}` plus an
   optional `:gen{N}` suffix. The part before the suffix is a durable **bucket**
   (history and channel links hang off it); the **generation** rotates to start a
-  fresh transcript within the bucket. `chatType` is `direct` today; `group` is
-  reserved.
+  fresh transcript within the bucket. `chatType` is a free string segment each
+  channel owns (§9 pins only the grammar, not the vocabulary): `direct` is the
+  baseline 1:1 DM; `forum` keys a group forum Topic to `(chat_id, thread_id)`;
+  `direct_topic` keys a **private-chat** forum Topic to `(chat_id, thread_id)`
+  (Telegram — still a 1:1 DM, but per-topic isolated); Discord also uses
+  `group` for a guild thread.
 - **`dm_scope`** (`MessagingConfig.dm_scope`): `per-channel-peer` (default) —
   one bucket per `(channel, user)`; `unified` — all DMs collapse into a single
   `unified:{agent}` bucket for cross-surface continuity. `agent` is part of the
