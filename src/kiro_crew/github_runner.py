@@ -257,7 +257,13 @@ def check_provider_path_component(path: Path, *, label: str, uid: int, strict: b
 
 
 def check_provider_path_component_windows(
-    path: Path, *, label: str, me_sid: str, strict: bool
+    path: Path,
+    *,
+    label: str,
+    me_sid: str,
+    strict: bool,
+    trust_owner_rights: bool = False,
+    volume_root: bool = False,
 ) -> None:
     """Apply the same policy to one path component, read from its Windows ACL.
 
@@ -269,6 +275,23 @@ def check_provider_path_component_windows(
     *me_sid* is the gateway user's SID, the analog of ``uid``. Note that an
     administrator's own SID is covered by ``S-1-5-32-544`` regardless, exactly
     as POSIX trusts ``uid 0``.
+
+    *trust_owner_rights* adds Owner Rights (``S-1-3-4``) to the trusted set, on
+    top of the well-known machine SIDs and (in relaxed mode) *me_sid*. The
+    staging-ancestor walk sets it: its chain runs over the data home, which
+    ``ensure_data_home`` locks down with an inheritable owner-only DACL whose
+    grants are ``(S-1-3-4, me)`` — so Owner Rights on that chain is this account's
+    own lockdown, not a foreign writer. The provider-executable walk leaves it
+    off and keeps its stricter set.
+
+    *volume_root* marks a component that is a VOLUME ROOT (``C:\\``, ``D:\\``). A
+    volume root is not an entry in any directory on this host, so it cannot be
+    renamed or deleted and a plain ``DELETE`` right on it swaps nothing. On such a
+    node a writer whose only substitution right is ``DELETE`` is dropped; every
+    other right (``FILE_DELETE_CHILD``, ``WRITE_DAC``, ``WRITE_OWNER``,
+    ``GENERIC_ALL``) still refuses, since those do give a child-swap vector. Only
+    the staging-ancestor walk sets it, for the drive-root node of a relocated data
+    home; the provider-executable walk leaves it off.
 
     The component must also sit on a **local volume**, which arrives on the
     descriptor as ``volume_is_local`` rather than as a second platform call from
@@ -305,6 +328,11 @@ def check_provider_path_component_windows(
         raise ValueError(f"{label} carries ACE types this policy cannot evaluate (type {types})")
 
     trusted = set(windows_acl.WELL_KNOWN_TRUSTED_SIDS)
+    if trust_owner_rights:
+        # Owner Rights (S-1-3-4) is read from the one constant ensure_data_home
+        # builds the lockdown DACL from, so the walk trusts exactly what the
+        # lockdown writes rather than a second spelling of the literal.
+        trusted.add(platform_compat._OWNER_RIGHTS_SID)
     if strict:
         # Strict mode is the analog of "root-owned and unwritable by the
         # gateway user": the machine, not the user, must own and control it.
@@ -322,6 +350,20 @@ def check_provider_path_component_windows(
             )
 
     offenders = [writer for writer in security.writers if writer.sid not in trusted]
+    if volume_root:
+        # A volume root is not an entry in any directory on this host, so it
+        # cannot itself be renamed or deleted: ``DELETE`` on the root grants its
+        # holder no way to swap anything. Replacing a CHILD of the root needs
+        # ``FILE_DELETE_CHILD`` on the root (or ``DELETE``/``WRITE_DAC``/
+        # ``WRITE_OWNER`` on the child, which the child's own node check sees),
+        # so a writer whose ONLY substitution right on the root is ``DELETE``
+        # offers no vector and is dropped here. Every other right --
+        # ``FILE_DELETE_CHILD``, ``WRITE_DAC``, ``WRITE_OWNER``, ``GENERIC_ALL`` --
+        # still refuses. This matters because a secondary NTFS volume's stock ACL
+        # grants ``Authenticated Users`` Modify (which includes ``DELETE`` but not
+        # ``FILE_DELETE_CHILD``) on the drive root, and a data home relocated
+        # directly under that root is safe yet was refused there.
+        offenders = [writer for writer in offenders if writer.rights != ("DELETE",)]
     if offenders:
         joined = "; ".join(writer.describe() for writer in offenders)
         raise ValueError(f"{label} can be replaced by {joined}")

@@ -8,6 +8,7 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -15,8 +16,9 @@ from pathlib import Path
 import pytest
 
 from conftest import make_dir_link
-from kiro_crew import windows_acl
+from kiro_crew import github_runner, windows_acl
 from kiro_crew.cloud import aws, source
+from kiro_crew.config import ensure_data_home
 
 
 class _FakeGroup:
@@ -1319,18 +1321,18 @@ class TestTarballStagingDirectory:
 class TestWindowsStagingAncestorWalk:
     """The Windows arm of the staging ancestor walk (:func:`source._first_replaceable_windows`).
 
-    Before #13711 the walk stood down on Windows and returned ``None``, so a
-    relocated data home under a peer-writable ancestor was unguarded there. These
-    pins run on the Linux CI runner by injecting a fake :func:`windows_acl.describe`
-    and the launcher SID, which is the whole point of keeping the descriptor read in
-    ``windows_acl`` and the policy here: the decision is a pure function of the
-    ``ComponentSecurity`` dataclass and needs no real Windows host.
+    The arm reuses :func:`github_runner.check_provider_path_component_windows` per
+    node, so these pins drive that shared policy by injecting a fake ``describe`` on
+    the module it reads through and the launcher SID. The decision is a pure
+    function of the ``ComponentSecurity`` dataclass, so it runs on the Linux CI
+    runner with no real Windows host.
 
     Not run on a real Windows host.
     """
 
     _ME = "S-1-5-21-1-2-3-1001"
     _PEER = "S-1-5-21-1-2-3-1002"
+    _OWNER_RIGHTS = "S-1-3-4"
 
     def _clean(self, owner_sid: str = _ME, **over):
         """A ``ComponentSecurity`` that passes the policy, overridable per field."""
@@ -1352,11 +1354,12 @@ class TestWindowsStagingAncestorWalk:
         monkeypatch.setattr(source.platform_compat, "current_user_sid", lambda: self._ME)
 
     def _serve(self, monkeypatch, by_node: dict):
-        """Make ``windows_acl.describe`` answer from ``by_node`` keyed on resolved path.
+        """Make ``describe`` answer from ``by_node`` keyed on resolved path.
 
-        A value may be a ``ComponentSecurity`` to return or an exception to raise.
-        A node not in the map gets a clean, launcher-owned descriptor, so a test
-        states only the ancestor it is about.
+        Patched on the module the shared policy reads through
+        (``github_runner.windows_acl``). A value may be a ``ComponentSecurity`` to
+        return or an exception to raise. A node not in the map gets a clean,
+        launcher-owned descriptor, so a test states only the ancestor it is about.
         """
 
         def _describe(path):
@@ -1365,7 +1368,7 @@ class TestWindowsStagingAncestorWalk:
                 raise value
             return value
 
-        monkeypatch.setattr(source.windows_acl, "describe", _describe)
+        monkeypatch.setattr(github_runner.windows_acl, "describe", _describe)
 
     def _chain(self, monkeypatch, tmp_path):
         """A two-level chain (home / data-home) scoped by ``_chain_the_launcher_owns``."""
@@ -1427,6 +1430,43 @@ class TestWindowsStagingAncestorWalk:
         )
         assert source._first_replaceable(data_home) is None
 
+    def test_owner_rights_from_the_data_home_lockdown_is_trusted(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # ensure_data_home locks the data home with an inheritable owner-only DACL
+        # whose grants are (S-1-3-4, me), so every node on this chain carries an
+        # Owner Rights full-control ACE. It is this account's own lockdown, not a
+        # foreign writer -- refusing on it would reject the ordinary locked-down
+        # home on every Windows launch. The provider-executable walk leaves
+        # trust_owner_rights off, which is why the staging walk must set it.
+        _, data_home = self._chain(monkeypatch, tmp_path)
+        owner_rights = windows_acl.Writer(
+            sid=self._OWNER_RIGHTS, name="NT AUTHORITY\\OWNER RIGHTS", rights=("WRITE_DAC",)
+        )
+        self._serve(monkeypatch, {data_home.resolve(): self._clean(writers=(owner_rights,))})
+        assert source._first_replaceable(data_home) is None
+
+    def test_the_policy_is_the_shared_github_runner_check(self, monkeypatch, tmp_path, _on_windows):
+        # The per-node decision must BE
+        # github_runner.check_provider_path_component_windows, not a second copy. If
+        # that function is not called, the walk cannot have asked the policy -- so a
+        # peer-writable ancestor would wrongly pass.
+        _, data_home = self._chain(monkeypatch, tmp_path)
+        calls: list = []
+        real = github_runner.check_provider_path_component_windows
+
+        def _spy(path, **kw):
+            calls.append((Path(path), kw.get("strict"), kw.get("trust_owner_rights")))
+            return real(path, **kw)
+
+        monkeypatch.setattr(github_runner, "check_provider_path_component_windows", _spy)
+        self._serve(monkeypatch, {})
+        source._first_replaceable(data_home)
+        assert calls, "the shared github_runner check was never called"
+        # Relaxed mode, and Owner Rights trusted on this chain.
+        assert all(strict is False for _, strict, _ in calls)
+        assert all(tor is True for _, _, tor in calls)
+
     def test_a_null_dacl_ancestor_is_refused(self, monkeypatch, tmp_path, _on_windows):
         home, data_home = self._chain(monkeypatch, tmp_path)
         self._serve(monkeypatch, {home.resolve(): self._clean(null_dacl=True)})
@@ -1454,7 +1494,7 @@ class TestWindowsStagingAncestorWalk:
             {home.resolve(): windows_acl.AclUnavailable("GetNamedSecurityInfo failed")},
         )
         result = source._first_replaceable(data_home)
-        assert result is not None and "cannot read" in result[1]
+        assert result is not None and "unreadable" in result[1]
 
     def test_an_unverifiable_launcher_sid_fails_closed(self, monkeypatch, tmp_path):
         # The POSIX arm cannot reach this (geteuid always answers), but the Windows
@@ -1466,13 +1506,188 @@ class TestWindowsStagingAncestorWalk:
         result = source._first_replaceable(data_home)
         assert result is not None and "SID" in result[1]
 
-    def test_the_walk_no_longer_stands_down_on_windows(self, monkeypatch, tmp_path, _on_windows):
-        # The regression this issue is about: the old arm returned None for every
-        # Windows chain. A peer-writable ancestor must now be caught.
+    def test_a_windows_chain_with_a_peer_writable_ancestor_is_refused(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # The core guarantee: a Windows chain is walked, not waved through, so a
+        # peer-writable ancestor is caught rather than returning None.
         home, data_home = self._chain(monkeypatch, tmp_path)
         peer = windows_acl.Writer(sid=self._PEER, name="DOMAIN\\peer", rights=("DELETE",))
         self._serve(monkeypatch, {home.resolve(): self._clean(writers=(peer,))})
         assert source._first_replaceable(data_home) is not None
+
+    def _relocated_chain(self, monkeypatch, tmp_path):
+        """A data home relocated OUTSIDE the operator's home, so the whole resolved
+        chain -- drive root included -- is in scope and ``_chain_the_launcher_owns``
+        returns the anchor as its first node.
+
+        ``Path.home()`` is pinned to a sibling of the data home (not an ancestor),
+        matching the relocated shape the live test uses. Returns ``(root, data_home)``
+        where ``root`` is the anchor node the walk visits first.
+        """
+        sibling_home = tmp_path / "elsewhere-home"
+        sibling_home.mkdir()
+        data_home = tmp_path / "relocated" / "data-home"
+        data_home.mkdir(parents=True)
+        monkeypatch.setattr(source.Path, "home", staticmethod(lambda: sibling_home))
+        root = Path(data_home.resolve().anchor)
+        return root, data_home
+
+    def test_a_delete_only_grant_on_the_volume_root_is_accepted(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # A volume root cannot be renamed or deleted, so a writer whose only right
+        # on the root is DELETE grants no swap vector. The stock secondary-NTFS
+        # ACL (Authenticated Users: Modify, which carries DELETE but not
+        # FILE_DELETE_CHILD) must not refuse a data home relocated under D:\.
+        root, data_home = self._relocated_chain(monkeypatch, tmp_path)
+        au = windows_acl.Writer(
+            sid="S-1-5-11", name="NT AUTHORITY\\Authenticated Users", rights=("DELETE",)
+        )
+        self._serve(monkeypatch, {root: self._clean(writers=(au,))})
+        assert source._first_replaceable(data_home) is None
+
+    def test_file_delete_child_on_the_volume_root_is_still_refused(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # The root exemption is DELETE-only: FILE_DELETE_CHILD on the root is the
+        # right that actually lets a peer swap a child of the root, so it refuses.
+        root, data_home = self._relocated_chain(monkeypatch, tmp_path)
+        peer = windows_acl.Writer(
+            sid=self._PEER, name="DOMAIN\\peer", rights=("FILE_DELETE_CHILD",)
+        )
+        self._serve(monkeypatch, {root: self._clean(writers=(peer,))})
+        result = source._first_replaceable(data_home)
+        assert result is not None
+        node, reason = result
+        assert node == root
+        assert self._PEER in reason and "replaced" in reason
+
+    def test_a_delete_right_on_a_non_root_node_is_still_refused(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # The exemption applies ONLY to the volume root. A peer with DELETE on a
+        # non-root ancestor can rename that entry away, so it must still refuse --
+        # the ordinary peer-writable-ancestor hazard this PR exists to catch.
+        root, data_home = self._relocated_chain(monkeypatch, tmp_path)
+        mid = data_home.resolve().parent
+        assert mid != root  # a genuine intermediate node, not the anchor
+        peer = windows_acl.Writer(sid=self._PEER, name="DOMAIN\\peer", rights=("DELETE",))
+        self._serve(monkeypatch, {mid: self._clean(writers=(peer,))})
+        result = source._first_replaceable(data_home)
+        assert result is not None
+        node, reason = result
+        assert node == mid
+        assert self._PEER in reason and "replaced" in reason
+
+    def test_only_the_volume_root_is_passed_volume_root_true(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # Pin that the walk marks exactly the anchor node volume_root=True and
+        # every other node volume_root=False, so the exemption cannot silently
+        # widen to intermediate directories.
+        root, data_home = self._relocated_chain(monkeypatch, tmp_path)
+        seen: dict = {}
+        real = github_runner.check_provider_path_component_windows
+
+        def _spy(path, **kw):
+            seen[Path(path)] = kw.get("volume_root")
+            return real(path, **kw)
+
+        monkeypatch.setattr(github_runner, "check_provider_path_component_windows", _spy)
+        self._serve(monkeypatch, {})
+        source._first_replaceable(data_home)
+        assert seen.get(root) is True
+        assert all(flag is False for node, flag in seen.items() if node != root)
+
+    def test_an_unexpected_describe_exception_fails_closed(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # describe() can raise something other than AclUnavailable (e.g. an OSError
+        # from the volume probe). The shared check only maps AclUnavailable to a
+        # ValueError, so the walk must catch the rest and fail closed on the node
+        # rather than let a raw exception escape the launch prologue.
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        self._serve(monkeypatch, {home.resolve(): OSError("volume probe failed")})
+        result = source._first_replaceable(data_home)
+        assert result is not None
+        node, reason = result
+        assert node == home.resolve()
+        assert "could not be checked" in reason and "OSError" in reason
+
+    def test_the_windows_refusal_carries_the_icacls_remedy(self, monkeypatch, tmp_path):
+        # Mutation guard: the refusal message on Windows must give icacls guidance,
+        # not the POSIX chmod/setfacl remedy, and must break inheritance first
+        # because the offending ACE on these chains is usually inherited.
+        monkeypatch.setattr(source.platform_compat, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            source, "_first_replaceable", lambda base: (Path("D:\\crew"), "is peer-writable")
+        )
+        monkeypatch.setattr(source, "config_dir", lambda: tmp_path)
+        with pytest.raises(aws.AWSError) as excinfo:
+            source._staging_dir()
+        message = str(excinfo.value)
+        assert "icacls" in message and "/inheritance:d" in message
+        assert "chmod" not in message and "setfacl" not in message
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="real Windows security descriptors")
+    @pytest.mark.parametrize("relocated", [False, True])
+    def test_a_real_data_home_passes_the_live_descriptor_walk(
+        self, monkeypatch, tmp_path, relocated
+    ):
+        """The walk accepts a real, freshly-locked-down data home on a Windows host.
+
+        This is the one case the synthetic-descriptor tests cannot cover: it runs
+        the live ``windows_acl.describe`` read (``advapi32``) against a data home
+        that ``ensure_data_home`` actually created and tightened with its
+        inheritable owner-only DACL, with NOTHING mocked. It is the proof that the
+        trusted set -- the launcher's SID plus Owner Rights (``S-1-3-4``) plus the
+        well-known machine SIDs -- matches the entries the real lockdown and the
+        real profile chain carry, rather than the author's model of them. A missing
+        trusted principal would refuse the ordinary launch, and only a real
+        descriptor would reveal it.
+
+        Two shapes, because they walk different chains
+        (:func:`source._chain_the_launcher_owns`): the default-shaped home nested
+        under the operator's own home stops the walk at that home, while a home
+        relocated outside it is walked whole, ancestors included.
+
+        Skipped off Windows: ``describe`` raises ``AclUnavailable`` on a platform
+        with no security API, so this asserts nothing there. It runs on the Windows
+        CI shard, which is the only place the live read exists.
+        """
+        if relocated:
+            # Outside the operator's profile home, so the whole resolved chain --
+            # up to the drive root -- is in scope and every ancestor's real
+            # descriptor is read. Path.home() is pinned to a SIBLING of the data
+            # home (not an ancestor), so the home is genuinely outside it; without
+            # this, on a Windows runner tmp_path sits under %TEMP% inside the real
+            # profile, _chain_the_launcher_owns stops at the profile, and this
+            # case would walk the same short chain as the one below.
+            sibling_home = tmp_path / "elsewhere-home"
+            sibling_home.mkdir()
+            monkeypatch.setattr(source.Path, "home", staticmethod(lambda: sibling_home))
+            base = tmp_path / "relocated-data-home"
+        else:
+            # Under a stand-in profile home, the default shape: the walk stops at
+            # that home.
+            profile = tmp_path / "profile"
+            profile.mkdir()
+            monkeypatch.setattr(source.Path, "home", staticmethod(lambda: profile))
+            base = profile / ".kiro" / "crew"
+        monkeypatch.setenv("KIROCREW_HOME", str(base))
+
+        # Build and lock down the real data home exactly as the gateway prologue
+        # does, then walk it with the live descriptor read and no mocks. For the
+        # relocated shape, assert the walk reached the drive root, so a passing run
+        # proves a full above-profile chain returns None rather than a short one.
+        home = ensure_data_home()
+        if relocated:
+            chain = source._chain_the_launcher_owns(home)
+            assert chain[0] == Path(
+                home.resolve().anchor
+            ), "relocated chain must start at the drive root"
+        assert source._first_replaceable_windows(home) is None
 
 
 class TestSourceChecksumPin:
