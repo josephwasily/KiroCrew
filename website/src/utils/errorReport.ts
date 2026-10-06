@@ -66,6 +66,14 @@ export interface ErrorReport {
   /** Failing request path, query string stripped. */
   endpoint?: string
   /**
+   * HTTP method of the failing request, for a transport rejection that produced
+   * no `Response` (see {@link recordTransportRejection}) — the method is the one
+   * fact such a failure has that an answered one reads off the `Response`. Only
+   * set on that path; an answered failure leaves it undefined (the method is not
+   * worth a field when a status already names the outcome).
+   */
+  method?: string
+  /**
    * Route the user was on when it happened. **Path only** — see
    * {@link currentRoute} for why the query string is dropped.
    */
@@ -239,6 +247,7 @@ export function recordError(input: {
   status?: number
   code?: string
   endpoint?: string
+  method?: string
   detail?: string
   route?: string
 }): ErrorReport {
@@ -250,6 +259,7 @@ export function recordError(input: {
     status: input.status,
     code: input.code,
     endpoint: input.endpoint,
+    method: input.method,
     route: input.route ?? currentRoute(),
     detail: normalizeDetail(input.detail),
   }
@@ -258,6 +268,61 @@ export function recordError(input: {
     try { fn(_journal) } catch { /* a bad subscriber must not break error recording */ }
   }
   return report
+}
+
+/**
+ * Per-endpoint burst cap for transport REJECTIONS (a `fetch` that never produced
+ * a `Response`), so recording them cannot wipe the journal.
+ *
+ * `recordError` is called once per answered failure, which is self-limiting. A
+ * rejection is not: while the gateway is unreachable, every polling query across
+ * ~190 call sites rejects on each tick, and left uncapped a few offline seconds
+ * would evict all 20 real reports (`MAX_JOURNAL`) and fill the ring with
+ * identical "Failed to fetch" lines — losing the very context this journal
+ * exists to keep. The cap records the FIRST rejection for an endpoint, then
+ * suppresses repeats for that endpoint for a cooldown window; a different
+ * endpoint still records on its own first miss, so a true outage leaves one
+ * entry per affected endpoint rather than one surface's retries drowning them.
+ */
+export const TRANSPORT_REJECTION_COOLDOWN_MS = 10_000
+const _rejectionSeenAt = new Map<string, number>()
+
+/**
+ * Record a transport-layer rejection — a `fetch` that rejected before any HTTP
+ * `Response` existed (a network drop, a `withDeadline` `TimeoutError`). Returns
+ * the stored report, or `undefined` when the per-endpoint burst cap suppressed
+ * it. `status` is deliberately never set: no response arrived, and a synthetic
+ * one would send a reader to audit a server that never spoke.
+ *
+ * Caller is responsible for excluding deliberate aborts (`AbortError`): an
+ * unmount or a superseded react-query key cancels on purpose and is not a
+ * failure a user can act on.
+ */
+export function recordTransportRejection(input: {
+  message: string
+  endpoint?: string
+  method?: string
+  code?: string
+}): ErrorReport | undefined {
+  // Key the cap on the endpoint; a rejection with no parseable endpoint falls
+  // back to its own message so unlike failures do not share one bucket (and no
+  // sentinel string is needed, which also keeps this out of the i18n scan).
+  const key = input.endpoint ?? input.message
+  const now = Date.now()
+  const last = _rejectionSeenAt.get(key)
+  if (last !== undefined && now - last < TRANSPORT_REJECTION_COOLDOWN_MS) return undefined
+  _rejectionSeenAt.set(key, now)
+  // The HTTP method travels in its own `method` field (buildErrorPrompt renders
+  // it, and the layer that broke is already named by `code: network|timeout`),
+  // so nothing here needs a free-form `detail` marker — the message, endpoint,
+  // method and code carry the whole report.
+  return recordError({
+    source: 'api',
+    message: input.message,
+    endpoint: input.endpoint,
+    method: input.method,
+    code: input.code,
+  })
 }
 
 /** Newest-first snapshot of the journal. */
@@ -331,6 +396,7 @@ export function __resetErrorJournalForTests(): void {
   _journal = []
   _seq = 0
   _listeners.clear()
+  _rejectionSeenAt.clear()
 }
 
 // `buildErrorPrompt` deliberately lives in `errorReport.prompt.ts` (the

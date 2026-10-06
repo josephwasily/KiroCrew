@@ -38,7 +38,8 @@ import {
 } from '../api/client'
 import { STALE_OWNER_SESSION_CODE, __resetStaleOwnerHandlerForTests, installStaleOwnerHandler } from '../api/staleOwnerSignal'
 import { queryClient } from '../api/queryClient'
-import { recentErrors, reportForError, __resetErrorJournalForTests } from '../utils/errorReport'
+import { recentErrors, reportForError, __resetErrorJournalForTests, TRANSPORT_REJECTION_COOLDOWN_MS } from '../utils/errorReport'
+import { buildErrorPrompt } from '../utils/errorReport.prompt'
 import { copyToClipboard } from '../utils/clipboard'
 import { resizeImageForModel } from '../utils/resizeImage'
 import { hasPendingArtifactWrite, __resetArtifactWrites } from '../lib/artifactWrites'
@@ -397,6 +398,103 @@ describe('client response handling', () => {
   it('jNullable still rejects with ApiError on a real failure', async () => {
     fetchMock.mockResolvedValue(res(500, 'boom'))
     await expect(api.tipsNext()).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+/* ───────────────── transport rejection (no HTTP Response) journaling ───────────────── */
+
+describe('transport rejection journaling', () => {
+  // #9579 / #12433: a fetch that rejects at the network layer never produces a
+  // Response, so `apiFailure` (which takes one) never runs and the failure was
+  // journaled nowhere — the "ask the agent" hand-off degraded to a bare
+  // "Failed to fetch" with no endpoint. The five helpers and the raw-fetch
+  // family both route through `jfetch`, which journals the rejection.
+
+  it('journals a network rejection on a five-helper (GET) call with endpoint and method, no status', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    await expect(api.securityStats()).rejects.toThrow('Failed to fetch')
+    const [report] = recentErrors()
+    expect(report).toMatchObject({
+      source: 'api',
+      message: 'Failed to fetch',
+      endpoint: '/api/security/stats',
+      method: 'GET',
+      code: 'network',
+    })
+    // No response arrived: a synthetic status would mis-route a reader to the server.
+    expect(report.status).toBeUndefined()
+    // The method renders in the hand-off prompt alongside the endpoint.
+    expect(buildErrorPrompt(report, 'lead')).toContain('- Request: GET /api/security/stats')
+  })
+
+  it('journals a network rejection on a raw-fetch-family method too', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    await expect(api.sessionsMemory()).rejects.toThrow('Failed to fetch')
+    expect(recentErrors()[0]).toMatchObject({
+      source: 'api',
+      message: 'Failed to fetch',
+      endpoint: '/api/sessions/memory',
+    })
+  })
+
+  it('records the rejection message VERBATIM so findReport/ask-agent can resolve it', async () => {
+    // findReport matches on exact message; rewording here would orphan the entry.
+    fetchMock.mockRejectedValue(new TypeError('Load failed')) // Safari's wording
+    const err = await api.securityStats().catch((e: unknown) => e)
+    expect(recentErrors()[0].message).toBe('Load failed')
+    // The report is pinned to the rejection, so the notice resolves THIS endpoint.
+    expect(reportForError(err)?.endpoint).toBe('/api/security/stats')
+  })
+
+  it('does NOT journal a deliberate AbortError (unmount / superseded react-query key)', async () => {
+    const abort = new DOMException('The operation was aborted.', 'AbortError')
+    fetchMock.mockRejectedValue(abort)
+    await expect(api.securityStats()).rejects.toBe(abort)
+    expect(recentErrors()).toHaveLength(0)
+  })
+
+  it('DOES journal a withDeadline TimeoutError (a genuine failure, not an abort)', async () => {
+    const timeout = new Error('deadline exceeded')
+    timeout.name = 'TimeoutError'
+    fetchMock.mockRejectedValue(timeout)
+    await expect(api.securityStats()).rejects.toThrow('deadline exceeded')
+    expect(recentErrors()[0]).toMatchObject({
+      source: 'api',
+      message: 'deadline exceeded',
+      code: 'timeout',
+      endpoint: '/api/security/stats',
+    })
+  })
+
+  it('burst-caps repeats per endpoint so offline polling cannot flush the 20-deep ring', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    // Same endpoint rejected many times in a tight burst -> one entry, not many.
+    for (let i = 0; i < 25; i++) await api.securityStats().catch(() => {})
+    const sameEndpoint = recentErrors().filter(r => r.endpoint === '/api/security/stats')
+    expect(sameEndpoint).toHaveLength(1)
+  })
+
+  it('still records a DIFFERENT endpoint on its own first miss during the burst', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    await api.securityStats().catch(() => {})
+    await api.sessionsMemory().catch(() => {})
+    const endpoints = recentErrors().map(r => r.endpoint).sort()
+    expect(endpoints).toEqual(['/api/security/stats', '/api/sessions/memory'])
+  })
+
+  it('records the same endpoint again once the cooldown window has elapsed', async () => {
+    vi.useFakeTimers()
+    try {
+      fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+      await api.securityStats().catch(() => {})
+      await api.securityStats().catch(() => {})
+      expect(recentErrors().filter(r => r.endpoint === '/api/security/stats')).toHaveLength(1)
+      vi.advanceTimersByTime(TRANSPORT_REJECTION_COOLDOWN_MS + 1)
+      await api.securityStats().catch(() => {})
+      expect(recentErrors().filter(r => r.endpoint === '/api/security/stats')).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

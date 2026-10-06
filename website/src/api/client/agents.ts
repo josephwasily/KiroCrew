@@ -120,7 +120,7 @@ export interface CrewPanelHistoryRow {
   template: string
 }
 
-export function createAgentsEndpoints({ post, put, del, j, sessionKeyHeader: _sk }: ClientTransport) {
+export function createAgentsEndpoints({ post, put, del, j, jfetch: fetch, sessionKeyHeader: _sk }: ClientTransport) {
   const crew = {
     // Agents
     agentsInstalled: () => fetch('/api/agents/installed').then(j),
