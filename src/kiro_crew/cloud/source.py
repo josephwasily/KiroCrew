@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
-from kiro_crew import platform_compat
+from kiro_crew import platform_compat, windows_acl
 from kiro_crew.cloud import aws
 from kiro_crew.config.loader import config_dir
 from kiro_crew.sel import sel
@@ -221,8 +221,8 @@ def _group_shared_with_another_account(gid: int) -> Optional[str]:
     with the same gid, and each grants its members that gid as a supplementary
     group. So the supplementary half reads every entry carrying the gid.
     """
-    # Local import: neither module exists on Windows, where the walk has already
-    # stood down before reaching here.
+    # Local import: neither module exists on Windows, which never reaches here --
+    # only the POSIX arm of the walk calls this; the Windows arm reads the ACL.
     import grp
     import pwd
 
@@ -303,6 +303,81 @@ def _acl_admits_another_account(node: Path, mine: int) -> Optional[str]:
     return None
 
 
+def _first_replaceable_windows(path: Path) -> Optional[tuple[Path, str]]:
+    """The Windows arm of :func:`_first_replaceable`, read from the ACL.
+
+    The same two questions the POSIX walk asks -- is an ancestor owned by a third
+    account, and can anything outside the trusted set replace what is inside it --
+    answered from each directory's SECURITY DESCRIPTOR because ``st_uid`` and the
+    mode bits carry no information on Windows (``os.stat`` reports ``st_uid == 0``
+    and ``st_mode == 0o777`` for every path). :func:`kiro_crew.windows_acl.describe`
+    supplies the real answer: the owner SID and the set of principals holding a
+    right capable of REPLACING an entry inside the directory.
+
+    This is the decision the stand-down used to skip. Before this, the only
+    Windows protections on the staging path were the link/junction screens and the
+    inheritable owner-only DACL on the staging leaf, and neither sees an ANCESTOR of
+    the leaf renamed away and replaced with a real directory. On a multi-user host
+    whose data home was relocated under a directory a local peer can write, that
+    swap reaches the uploaded tarball. The walk closes it.
+
+    The trusted set is the Windows analog of the POSIX ``(mine, 0)``:
+    :data:`~kiro_crew.windows_acl.WELL_KNOWN_TRUSTED_SIDS` (SYSTEM, Administrators,
+    TrustedInstaller) stands in for root -- a principal already owning the host does
+    not need a directory to substitute the tarball -- plus the launcher's own SID,
+    the analog of ``uid``. This mirrors the relaxed-mode trust set of
+    :func:`kiro_crew.github_runner.check_provider_path_component_windows` exactly:
+    the launcher is answerable for the chain, and its OWN write on a directory it
+    owns is not a foreign swap.
+
+    Fails closed, like every other arm of this check:
+
+    * the launcher's SID is unverifiable (``current_user_sid`` reads only this
+      process's access token and returns ``None`` on failure) -- there is nothing
+      to compare an owner or writer against, so refuse;
+    * the descriptor is unreadable (``AclUnavailable``) -- a check that cannot see
+      the ACL has not cleared the directory;
+    * the directory is not on a LOCAL volume -- the well-known trusted SIDs are
+      machine-local alias SIDs and name a different principal on a remote share, so
+      trusting them off this host would trust whoever administers that server;
+    * a NULL DACL (everyone has full control) or an ACE type this reader cannot
+      parse -- an incompletely understood descriptor is not a clean one.
+
+    Only ancestors :func:`_chain_the_launcher_owns` returns are in scope, same as
+    POSIX: a directory above the operator's home belongs to the administrator, and a
+    relocated home is walked whole.
+    """
+    me_sid = platform_compat.current_user_sid()
+    if not me_sid:
+        # Nothing to compare an owner or writer against. The POSIX arm cannot reach
+        # this -- geteuid always answers -- but the token read can fail on Windows,
+        # and an unverifiable launcher is not a trusted one.
+        return path, "runs under a user whose SID this host cannot verify"
+    trusted = set(windows_acl.WELL_KNOWN_TRUSTED_SIDS) | {me_sid}
+    for node in _chain_the_launcher_owns(path):
+        try:
+            security = windows_acl.describe(node)
+        except windows_acl.AclUnavailable as exc:
+            # An unreadable descriptor is one this process cannot clear either, so
+            # it is the answer rather than something to walk past (the POSIX arm
+            # treats an unstattable node the same way).
+            return node, f"has a security descriptor this host cannot read ({exc})"
+        if not security.volume_is_local:
+            return node, "is not on a local volume, where the trusted SIDs carry no meaning"
+        if security.null_dacl:
+            return node, "has a NULL DACL, which grants every account full control"
+        if security.unparsable_ace_types:
+            types = ",".join(str(t) for t in security.unparsable_ace_types)
+            return node, f"carries ACE types this check cannot evaluate (type {types})"
+        if security.owner_sid not in trusted:
+            return node, f"is owned by another account ({security.owner_name}, {security.owner_sid})"
+        offenders = [writer for writer in security.writers if writer.sid not in trusted]
+        if offenders:
+            joined = "; ".join(writer.describe() for writer in offenders)
+            return node, f"can be replaced by {joined}"
+    return None
+
+
 def _first_replaceable(path: Path) -> Optional[tuple[Path, str]]:
     """The outermost directory the launcher owns that another account could replace into.
 
@@ -339,11 +414,12 @@ def _first_replaceable(path: Path) -> Optional[tuple[Path, str]]:
     :func:`_acl_admits_another_account` asks the named entries the same question.
 
     Root-first, so the answer is the outermost problem rather than an inner symptom
-    of it. Windows mode bits and uids carry no ACL information, so the walk stands
-    down there and the ACL the lockdown applies is the guarantee instead.
+    of it. On Windows ``st_uid`` and the mode bits carry no information, so the walk
+    reads each ancestor's SECURITY DESCRIPTOR instead and asks the same two
+    questions from it -- see :func:`_first_replaceable_windows`.
     """
     if platform_compat.IS_WINDOWS:
-        return None
+        return _first_replaceable_windows(path)
     mine = os.geteuid()
     for node in _chain_the_launcher_owns(path):
         try:

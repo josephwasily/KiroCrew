@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from conftest import make_dir_link
+from kiro_crew import windows_acl
 from kiro_crew.cloud import aws, source
 
 
@@ -1313,6 +1314,165 @@ class TestTarballStagingDirectory:
         leaked = [p for p in staged if Path(p).exists()]
         assert not leaked, f"an interrupted archive leaked staged tarball(s): {leaked}"
         assert list((home / source._STAGING_DIR_LEAF).iterdir()) == []
+
+
+class TestWindowsStagingAncestorWalk:
+    """The Windows arm of the staging ancestor walk (:func:`source._first_replaceable_windows`).
+
+    Before #13711 the walk stood down on Windows and returned ``None``, so a
+    relocated data home under a peer-writable ancestor was unguarded there. These
+    pins run on the Linux CI runner by injecting a fake :func:`windows_acl.describe`
+    and the launcher SID, which is the whole point of keeping the descriptor read in
+    ``windows_acl`` and the policy here: the decision is a pure function of the
+    ``ComponentSecurity`` dataclass and needs no real Windows host.
+
+    Not run on a real Windows host.
+    """
+
+    _ME = "S-1-5-21-1-2-3-1001"
+    _PEER = "S-1-5-21-1-2-3-1002"
+
+    def _clean(self, owner_sid: str = _ME, **over):
+        """A ``ComponentSecurity`` that passes the policy, overridable per field."""
+        fields = dict(
+            owner_sid=owner_sid,
+            owner_name="DOMAIN\\me",
+            null_dacl=False,
+            writers=(),
+            unparsable_ace_types=(),
+            volume_is_local=True,
+        )
+        fields.update(over)
+        return windows_acl.ComponentSecurity(**fields)
+
+    @pytest.fixture
+    def _on_windows(self, monkeypatch):
+        """Pretend to be on Windows with a verifiable launcher SID."""
+        monkeypatch.setattr(source.platform_compat, "IS_WINDOWS", True)
+        monkeypatch.setattr(source.platform_compat, "current_user_sid", lambda: self._ME)
+
+    def _serve(self, monkeypatch, by_node: dict):
+        """Make ``windows_acl.describe`` answer from ``by_node`` keyed on resolved path.
+
+        A value may be a ``ComponentSecurity`` to return or an exception to raise.
+        A node not in the map gets a clean, launcher-owned descriptor, so a test
+        states only the ancestor it is about.
+        """
+
+        def _describe(path):
+            value = by_node.get(Path(path), self._clean())
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        monkeypatch.setattr(source.windows_acl, "describe", _describe)
+
+    def _chain(self, monkeypatch, tmp_path):
+        """A two-level chain (home / data-home) scoped by ``_chain_the_launcher_owns``."""
+        home = tmp_path / "home"
+        data_home = home / "data-home"
+        data_home.mkdir(parents=True)
+        monkeypatch.setattr(source.Path, "home", staticmethod(lambda: home))
+        return home, data_home
+
+    def test_a_clean_chain_is_accepted(self, monkeypatch, tmp_path, _on_windows):
+        _, data_home = self._chain(monkeypatch, tmp_path)
+        self._serve(monkeypatch, {})
+        assert source._first_replaceable(data_home) is None
+
+    def test_a_foreign_owned_ancestor_is_refused(self, monkeypatch, tmp_path, _on_windows):
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        self._serve(monkeypatch, {home.resolve(): self._clean(owner_sid=self._PEER)})
+        result = source._first_replaceable(data_home)
+        assert result is not None
+        node, reason = result
+        assert node == home.resolve()
+        assert "owned by another account" in reason
+
+    def test_a_peer_writer_on_an_ancestor_is_refused(self, monkeypatch, tmp_path, _on_windows):
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        peer = windows_acl.Writer(
+            sid=self._PEER, name="DOMAIN\\peer", rights=("FILE_DELETE_CHILD",)
+        )
+        self._serve(monkeypatch, {home.resolve(): self._clean(writers=(peer,))})
+        result = source._first_replaceable(data_home)
+        assert result is not None
+        node, reason = result
+        assert node == home.resolve()
+        assert self._PEER in reason and "replaced" in reason
+
+    def test_the_launchers_own_write_is_not_a_foreign_swap(
+        self, monkeypatch, tmp_path, _on_windows
+    ):
+        # The relaxed-mode analog of trusting ``uid``: the launcher is answerable
+        # for the chain, so its own substitution-capable right on a directory it
+        # owns is not a hostile writer.
+        _, data_home = self._chain(monkeypatch, tmp_path)
+        me = windows_acl.Writer(sid=self._ME, name="DOMAIN\\me", rights=("WRITE_DAC",))
+        self._serve(monkeypatch, {data_home.resolve(): self._clean(writers=(me,))})
+        assert source._first_replaceable(data_home) is None
+
+    def test_well_known_system_sids_are_trusted(self, monkeypatch, tmp_path, _on_windows):
+        # SYSTEM / Administrators / TrustedInstaller stand in for root, as both
+        # owner and writer -- a principal already owning the host does not need a
+        # directory to substitute the tarball.
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        system = next(iter(windows_acl.WELL_KNOWN_TRUSTED_SIDS))
+        admin = windows_acl.Writer(
+            sid="S-1-5-32-544", name="BUILTIN\\Administrators", rights=("WRITE_OWNER",)
+        )
+        self._serve(
+            monkeypatch,
+            {home.resolve(): self._clean(owner_sid=system, writers=(admin,))},
+        )
+        assert source._first_replaceable(data_home) is None
+
+    def test_a_null_dacl_ancestor_is_refused(self, monkeypatch, tmp_path, _on_windows):
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        self._serve(monkeypatch, {home.resolve(): self._clean(null_dacl=True)})
+        result = source._first_replaceable(data_home)
+        assert result is not None and "NULL DACL" in result[1]
+
+    def test_an_unparsable_ace_type_refuses(self, monkeypatch, tmp_path, _on_windows):
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        self._serve(monkeypatch, {home.resolve(): self._clean(unparsable_ace_types=(9,))})
+        result = source._first_replaceable(data_home)
+        assert result is not None and "cannot evaluate" in result[1]
+
+    def test_a_remote_volume_ancestor_is_refused(self, monkeypatch, tmp_path, _on_windows):
+        # The trusted SIDs are machine-local alias SIDs; off a local volume they
+        # name a different principal, so trusting them would be unsound.
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        self._serve(monkeypatch, {home.resolve(): self._clean(volume_is_local=False)})
+        result = source._first_replaceable(data_home)
+        assert result is not None and "local volume" in result[1]
+
+    def test_an_unreadable_descriptor_fails_closed(self, monkeypatch, tmp_path, _on_windows):
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        self._serve(
+            monkeypatch,
+            {home.resolve(): windows_acl.AclUnavailable("GetNamedSecurityInfo failed")},
+        )
+        result = source._first_replaceable(data_home)
+        assert result is not None and "cannot read" in result[1]
+
+    def test_an_unverifiable_launcher_sid_fails_closed(self, monkeypatch, tmp_path):
+        # The POSIX arm cannot reach this (geteuid always answers), but the Windows
+        # token read can fail, and an unverifiable launcher is not a trusted one.
+        _, data_home = self._chain(monkeypatch, tmp_path)
+        monkeypatch.setattr(source.platform_compat, "IS_WINDOWS", True)
+        monkeypatch.setattr(source.platform_compat, "current_user_sid", lambda: None)
+        self._serve(monkeypatch, {})
+        result = source._first_replaceable(data_home)
+        assert result is not None and "SID" in result[1]
+
+    def test_the_walk_no_longer_stands_down_on_windows(self, monkeypatch, tmp_path, _on_windows):
+        # The regression this issue is about: the old arm returned None for every
+        # Windows chain. A peer-writable ancestor must now be caught.
+        home, data_home = self._chain(monkeypatch, tmp_path)
+        peer = windows_acl.Writer(sid=self._PEER, name="DOMAIN\\peer", rights=("DELETE",))
+        self._serve(monkeypatch, {home.resolve(): self._clean(writers=(peer,))})
+        assert source._first_replaceable(data_home) is not None
 
 
 class TestSourceChecksumPin:
