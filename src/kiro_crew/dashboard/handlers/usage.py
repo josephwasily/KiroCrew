@@ -19,6 +19,7 @@ from aiohttp import web
 from kiro_crew import model_registry
 from kiro_crew.acp.types import TurnUsage
 from kiro_crew.config.paths import data_home, kiro_sessions_dir
+from kiro_crew.constants import crew_log_enabled
 from kiro_crew.context_blocks import USER_LABEL
 from kiro_crew.hooks import validate_file_path
 from kiro_crew.jsonl_util import bounded_records
@@ -858,6 +859,9 @@ def context_trace(slot: str, days: int = 14) -> dict[str, Any]:
                 # count to an array index would corrupt it, because the index counts only
                 # the rows still present AND inside the window.
                 "ordinal": _coerce_int(row.get("ordinal")),
+                # The fold's mark for the session's real start, so the panel labels
+                # only that row "session start" and any later one a rebuild.
+                "first_start": row.get("first_start") is True,
             }
         )
         # The peak INSIDE the requested window, with the window that same reading was
@@ -898,6 +902,12 @@ def context_trace(slot: str, days: int = 14) -> dict[str, Any]:
         # still be told.
         "context_window": peak_window if peak_seen else _coerce_int(context.get("window")),
         "window_days": days,
+        # Whether the gateway is recording at all. An empty list cannot say, and the
+        # two cases want different words: a session whose next turn will fill the
+        # panel, and a gateway whose ``KIROCREW_CREW_LOG`` switched recording off, for
+        # which nothing will ever arrive. Same field, same reading, as the crew-log
+        # fold read's own ``recording``.
+        "recording": crew_log_enabled(),
     }
 
 
