@@ -103,7 +103,9 @@ def test_explicit_workspace_still_wins(state):
     state.context_builder.get_lessons_for.assert_called_once_with("client-c")
 
 
-async def _list(state, tmp_path, session_key: str | None) -> list[tuple[str, str | None]]:
+async def _list(
+    state, tmp_path, session_key: str | None, *, internal: bool = False
+) -> list[tuple[str, str | None]]:
     """GET /api/lessons over a global file and two workspace files."""
     stores = {}
     for name in ("global", "client-a", "client-b"):
@@ -119,6 +121,7 @@ async def _list(state, tmp_path, session_key: str | None) -> list[tuple[str, str
     request.app = {"state": state}
     request.headers = {} if session_key is None else {"X-Session-Key": session_key}
     request.query = {}
+    request.get = {"internal_auth": True}.get if internal else {}.get
     configured = MagicMock(workspaces={"default": None, "client-a": None, "client-b": None})
     with (
         patch.object(cron, "_blocks_reads_session", return_value=False),
@@ -159,3 +162,59 @@ async def test_the_operator_dashboard_lists_every_configured_workspace(
         ("rule in client-a", "client-a"),
         ("rule in client-b", "client-b"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_key", [None, "dashboard:ui"])
+async def test_a_keyless_internal_caller_lists_only_global(state, tmp_path, session_key):
+    """An agent whose identity resolved to no key is not the operator surface."""
+    _slot(state, "chat-busy", "client-b", 500)
+    rows = await _list(state, tmp_path, session_key, internal=True)
+    assert rows == [("rule in global", None)]
+
+
+async def _create(state, tmp_path, session_key: str, body: dict):
+    """POST /api/lessons on the JSONL path; returns (response, stores)."""
+    stores = {name: LessonStore(base_dir=tmp_path / name) for name in ("global", "client-a")}
+    state.lessons = stores["global"]
+    state.context_builder = MagicMock()
+    state.context_builder.get_lessons_for = MagicMock(side_effect=stores.__getitem__)
+
+    request = MagicMock()
+    request.app = {"state": state}
+    request.headers = {"X-Session-Key": session_key}
+    configured = MagicMock()
+    configured.memory.persistence_enabled = True
+    with (
+        patch.object(cron, "read_bounded_json", new=AsyncMock(return_value=(body, None))),
+        patch.object(cron, "_recognize_session", new=AsyncMock(return_value=None)),
+        patch.object(cron, "_is_restricted_session", return_value=False),
+        patch.object(cron, "resolve_lesson_memory_store", new=AsyncMock(return_value=(None, None))),
+        patch.object(cron, "_prepare_member_lesson_store", new=AsyncMock(return_value=None)),
+        patch.object(cron, "_get_memory", return_value=MagicMock(vector_store=None)),
+        patch.object(cron.KiroCrewConfig, "load", return_value=configured),
+    ):
+        resp = await cron.api_lessons_create(request)
+    return resp, stores
+
+
+@pytest.mark.asyncio
+async def test_a_slotless_workspace_write_is_refused_not_made_global(state, tmp_path):
+    _slot(state, "chat-busy", "client-b", 500)
+    resp, stores = await _create(
+        state, tmp_path, "cron:nightly-digest", {"rule": "keep it local", "scope": "workspace"}
+    )
+    assert resp.status == 400
+    assert json.loads(resp.text)["code"] == "workspace_required"
+    assert stores["global"].load_all() == []
+
+
+@pytest.mark.asyncio
+async def test_a_slotted_workspace_write_lands_in_its_own_workspace(state, tmp_path):
+    mine = _slot(state, "chat-mine", "client-a", 1)
+    resp, stores = await _create(
+        state, tmp_path, slot_history_key(mine), {"rule": "keep it local", "scope": "workspace"}
+    )
+    assert resp.status == 200
+    assert [lesson.rule for lesson in stores["client-a"].load_all()] == ["keep it local"]
+    assert stores["global"].load_all() == []

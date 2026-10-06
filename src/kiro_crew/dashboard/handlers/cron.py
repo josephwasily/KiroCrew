@@ -2994,6 +2994,26 @@ async def api_lessons_create(request: web.Request) -> web.Response:
                 state._background_tasks.add(task)
                 task.add_done_callback(state._background_tasks.discard)
     else:
+        # A workspace-scoped write that names no workspace takes the requesting
+        # session's. When that resolves to "default" -- no key, or a key with no
+        # live slot -- the write would land in the GLOBAL file, which every
+        # workspace reads. Refuse it, like the delete route refuses
+        # scope='workspace' without a name, rather than widen its reach.
+        if (
+            not _lesson_silo
+            and scope == "workspace"
+            and not cleaned.get("workspace")
+            and _get_active_workspace(state, sk) == "default"
+        ):
+            return web.json_response(
+                {
+                    "error": "scope='workspace' requires a workspace name: this "
+                    "session has no workspace of its own; use scope='global' or "
+                    "name the workspace",
+                    "code": "workspace_required",
+                },
+                status=400,
+            )
         lesson = Lesson(
             rule=rule,
             category=category,
@@ -3863,11 +3883,14 @@ async def api_lessons(request: web.Request) -> web.Response:
             # agent session sees only its own slot's workspace; the operator's own
             # dashboard surface (no key, or the shared ``dashboard:ui`` key, which
             # names no slot) lists every configured workspace, so each workspace
-            # row stays visible and deletable from the Memory tab.
+            # row stays visible and deletable from the Memory tab. That surface is
+            # browser-authenticated; an internal-secret caller whose identity
+            # resolved to no key is an agent, not the operator, so it falls
+            # through to the per-session branch and sees the global rows only.
             sk = request.headers.get("X-Session-Key", "")
             if workspace:
                 union = [workspace]
-            elif sk in ("", "dashboard:ui"):
+            elif sk in ("", "dashboard:ui") and request.get("internal_auth") is not True:
                 cfg = await asyncio.to_thread(KiroCrewConfig.load)
                 union = sorted(cfg.workspaces)
             else:
