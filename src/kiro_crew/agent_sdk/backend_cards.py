@@ -386,6 +386,12 @@ OFF_CARD_SETS: Mapping[str, str] = {
         "different question, and it is on the card as an ineffective setting where it "
         "holds"
     ),
+    "ACP_BACKENDS_MODEL_LIST_FROM_SELECT": (
+        "where Crew reads a session's served model list from when the host sends no "
+        "`models` object. The user sees no feature differ: it only feeds the guards "
+        "that keep an unserved model off the wire and word its rejection. A wrong "
+        "membership leaves that list empty, which is a defect"
+    ),
     "ACP_BACKENDS_ACP_RUNTIME": (
         "which transport starts a session: one shared process demuxed by AcpRuntime, or "
         "one process per session. The user gets a session either way; a wrong membership "

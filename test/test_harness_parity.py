@@ -61,12 +61,12 @@ from kiro_crew.acp.types import (
     PROVIDER_LABEL_PI,
 )
 from kiro_crew.acp_backends import (
-    ACP_BACKENDS_ADVERTISED_MODEL_SELECTION,
     ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION,
     ACP_BACKENDS_KIRO_SLASH_COMMANDS,
     ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD,
     ACP_BACKENDS_MEMBER_CAPABILITIES,
     ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
+    ACP_BACKENDS_MODEL_LIST_FROM_SELECT,
     ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION,
     ACP_BACKENDS_SIDE_READONLY,
     ACP_BACKENDS_TOOL_SEARCH_OVERLAY,
@@ -1078,7 +1078,7 @@ def test_the_model_select_fold_matches_the_advertised_selection_table(backend):
         models_from_config_options,
     )
 
-    opted_in = backend in ACP_BACKENDS_ADVERTISED_MODEL_SELECTION
+    opted_in = backend in ACP_BACKENDS_MODEL_LIST_FROM_SELECT
     assert (models_from_config_options(_SELECT_ONLY_SESSION_RESP, backend) is not None) is opted_in
     folded = advertised_models_from_session(_SELECT_ONLY_SESSION_RESP, backend)
     assert bool(folded) is opted_in

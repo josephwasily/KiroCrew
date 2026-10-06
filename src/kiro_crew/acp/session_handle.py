@@ -108,10 +108,10 @@ from kiro_crew.acp.prompt_blocks import build_prompt_blocks, summarize_prompt_st
 from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
-    ACP_BACKENDS_ADVERTISED_MODEL_SELECTION,
     ACP_BACKENDS_HOOKS_LIST,
     ACP_BACKENDS_INLINE_COMPACTION,
     ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
+    ACP_BACKENDS_MODEL_LIST_FROM_SELECT,
     ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION,
     ACP_BACKENDS_STEER,
     ACP_BACKENDS_STEERING_REQUEST,
@@ -662,15 +662,15 @@ def models_from_config_options(resp: dict[str, Any], backend: str) -> dict[str, 
     ``configOptions`` instead, as a ``select`` whose ``options`` carry the ids
     ``session/set_config_option`` accepts -- so a caller that reads only ``models``
     records nothing and the picker it feeds is empty. Gated on membership in
-    ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION`` (harness-parity H6): the fold is
-    only meaningful where the advertised list IS the vocabulary, and a host outside
-    that set keeps whatever the static registry gave it.
+    ``ACP_BACKENDS_MODEL_LIST_FROM_SELECT`` (harness-parity H6): the fold is only
+    meaningful where the select's values ARE the ids the host serves, and a host
+    outside that set keeps whatever the static registry gave it.
 
     Authored once because both drivers need the same answer -- ``AcpClient`` on the
     per-session path and ``AcpSessionHandle`` on the shared-runtime one -- and a
     second copy is free to disagree about the select's shape.
     """
-    if backend not in ACP_BACKENDS_ADVERTISED_MODEL_SELECTION:
+    if backend not in ACP_BACKENDS_MODEL_LIST_FROM_SELECT:
         return None
     for opt in resp.get("configOptions") or []:
         if not isinstance(opt, dict) or opt.get("id") != "model" or opt.get("type") != "select":
@@ -3667,7 +3667,7 @@ class AcpSessionHandle:
             self._sync_effort_levels()
         # Where this host's model list lives is asked in ONE place
         # (``session_models_envelope``): a host in
-        # ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION`` advertises no ``models`` object
+        # ``ACP_BACKENDS_MODEL_LIST_FROM_SELECT`` advertises no ``models`` object
         # and puts the list in a ``configOptions`` ``model`` select, and a reader that
         # knows about one shape and not the other is how the entitlement probe came to
         # answer ``[]`` for codex while this path answered correctly. Absent stays

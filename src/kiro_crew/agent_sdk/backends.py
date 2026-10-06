@@ -149,6 +149,9 @@ with no row here.
        registry, answers that this session takes an effort level and which ones)
    * - ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION``
      - semantic question (``SessionCapabilities.resolves_model_from_advertised_list``)
+   * - ``ACP_BACKENDS_MODEL_LIST_FROM_SELECT``
+     - driver-internal (whether a ``configOptions`` ``model`` select is captured as
+       the session's advertised model list)
    * - ``ACP_BACKENDS_SEED_LOCAL_SETTINGS``
      - driver-internal (whether ``settings.local.json`` is re-seeded on switch)
    * - ``ACP_BACKENDS_KIRO_SLASH_COMMANDS``
@@ -1916,6 +1919,29 @@ ACP_BACKENDS_ADVERTISED_MODEL_SELECTION = frozenset(
         ACP_BACKEND_PI,
         ACP_BACKEND_GOOSE,
         ACP_BACKEND_DEEPSEEK,
+    }
+)
+
+# Backends whose session model list is read from a ``configOptions`` ``model``
+# select when the response carries no ``models`` object. Every member of
+# ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION``, plus KAS. KAS puts its list only in
+# that select (``test/fixtures/acp_frames/kas/session.jsonl``). Without the capture
+# a KAS session's list stays empty, which reads as "entitlement unknown": ``auto``
+# goes on the wire on an account that does not serve it, and the rejection is
+# worded as a capacity blip that advises setting ``auto``. KAS takes only this
+# capture half: it serves its ids verbatim, so it needs none of the spelling fold
+# or registry swap the larger set buys. Spelled out rather than derived from the
+# larger set, so a harness joining that one for its fold does not inherit this
+# read without opting in (harness-parity H6).
+ACP_BACKENDS_MODEL_LIST_FROM_SELECT = frozenset(
+    {
+        ACP_BACKEND_CLAUDE,
+        ACP_BACKEND_CODEX,
+        ACP_BACKEND_OPENCODE,
+        ACP_BACKEND_PI,
+        ACP_BACKEND_GOOSE,
+        ACP_BACKEND_DEEPSEEK,
+        ACP_BACKEND_KAS,
     }
 )
 
