@@ -181,6 +181,13 @@ export function SortableAppNavRow({ id, children }: { id: string; children: Reac
     <div
       ref={setNodeRef}
       role="presentation"
+      // w-full so the inner NavItem fills the rail: the collapsed/compact rail
+      // centers an icon via `.nav-item{justify-content:center;width:100%}`, but
+      // `width:100%` resolves against THIS wrapper — without w-full the wrapper
+      // shrinks to the icon and the app icon sits left of the rail centre while
+      // the unwrapped Main-group rows (no wrapper) stay centred. See index.css
+      // `.dashboard-navigation[data-compact="true"] .nav-item`.
+      className="w-full min-w-0"
       style={{
         transform: transform ? CSS.Transform.toString(transform) : undefined,
         transition: transition || undefined,
