@@ -38,6 +38,7 @@ from kiro_crew.hooks import (
     fire_tool_hooks,
     get_global_hook_store,
     hook_gate_kwargs,
+    title_is_trusted_mcp_identity,
 )
 from kiro_crew.image_refs import strip_image_refs
 from kiro_crew.messaging.link import canonical_key
@@ -1255,6 +1256,7 @@ def _title_denial(
     denied_regexes: list[str] | None,
     *,
     exempt_command: str | None = None,
+    identity_exempt: bool = False,
 ) -> tuple[str, str] | None:
     """Return the always-enforced denial for the tool *title*, or ``None``.
 
@@ -1274,8 +1276,15 @@ def _title_denial(
     # stall, refused the command as a sensitive path. ``exempt_command`` is
     # :func:`_path_tier_exempt`'s answer -- the one string that is that text; a
     # title that is not the command stays gated.
+    #
+    # ``identity_exempt`` is the same reasoning for a tool NAME: the caller sets
+    # it only when the title is exactly the call's own verified ``@server/tool``
+    # identity (``title_is_trusted_mcp_identity``), which names a tool, not a
+    # file. The bash and regex tiers below still read it.
     path_refusal = (
-        None if _is_exempt_command_text(title, exempt_command) else sensitive_path_refusal(title)
+        None
+        if identity_exempt or _is_exempt_command_text(title, exempt_command)
+        else sensitive_path_refusal(title)
     )
     if path_refusal:
         # A stall is passed through as worded (recognised by its fixed prefix, which
@@ -3089,7 +3098,15 @@ async def _resolve_permission(
         # the strings. Title first, so a request denied on its title
         # reports the title-tier reason and mechanism exactly as before.
         title_hit = _title_denial(
-            normalized, _denied_regexes, exempt_command=_path_tier_exempt(event)
+            normalized,
+            _denied_regexes,
+            exempt_command=_path_tier_exempt(event),
+            identity_exempt=title_is_trusted_mcp_identity(
+                normalized,
+                getattr(event, "mcp_server_name", "") or "",
+                getattr(event, "tool_name", "") or "",
+                mcp_identity_trusted=bool(getattr(event, "mcp_identity_trusted", False)),
+            ),
         )
         if title_hit is not None:
             return (title_hit[0], title_hit[1], normalized, "always_deny")
