@@ -87,6 +87,8 @@ __all__ = [
     "bounded_for_delivery",
     "iter_fence_spans",
     "iter_fence_lines",
+    "fence_opening",
+    "fence_closes",
     "truncate_utf8",
     "FENCE_OUTSIDE",
     "FENCE_OPEN",
@@ -1055,6 +1057,33 @@ def _lines(text: str) -> list[_Frag]:
     return frags
 
 
+def fence_opening(line: str) -> tuple[str, int] | None:
+    """The fence *line* opens, as ``(char, length)``, or ``None``.
+
+    The one spelling of the CommonMark §4.5 opener rule: <=3 spaces of indent,
+    a run of >=3 backticks or tildes, and -- for backticks only -- an info
+    string with no backtick in it. ``line`` carries no terminator. The char and
+    length are returned because a closer must match the char and be at least as
+    long (see :func:`fence_closes`).
+
+    Public so a consumer that must interleave fence state with its own per-line
+    state (an HTML block may not start inside a fence) drives the same rule as
+    :func:`iter_fence_spans` instead of keeping a copy that drifts.
+    """
+    m = _BACKTICK_OPEN_RE.match(line) or _TILDE_OPEN_RE.match(line)
+    return (m.group(1)[0], len(m.group(1))) if m else None
+
+
+def fence_closes(line: str, char: str, length: int) -> bool:
+    """Whether *line* closes a fence opened with *length* ``char`` characters.
+
+    Only ASCII space/tab may follow the run (CommonMark); ``str.strip`` would
+    also accept a non-breaking space the renderer does not.
+    """
+    m = _CLOSE_RE.match(line)
+    return m is not None and m.group(1)[0] == char and len(m.group(1)) >= length
+
+
 def _advance(fence: _Fence | None, line: str) -> _Fence | None:
     """The fence state after *line*, given *fence* was open before it."""
     body = line[:-1] if line.endswith("\n") else line
@@ -1063,13 +1092,10 @@ def _advance(fence: _Fence | None, line: str) -> _Fence | None:
     if fence is not None:
         # Fence content is opaque: only a long-enough run of the SAME character
         # closes the block, so a ``` line inside a ````diff block stays content.
-        m = _CLOSE_RE.match(body)
-        if m and m.group(1)[0] == fence.char and len(m.group(1)) >= fence.length:
-            return None
-        return fence
-    m = _BACKTICK_OPEN_RE.match(body) or _TILDE_OPEN_RE.match(body)
-    if m:
-        return _Fence(char=m.group(1)[0], length=len(m.group(1)), opener=body)
+        return None if fence_closes(body, fence.char, fence.length) else fence
+    opening = fence_opening(body)
+    if opening:
+        return _Fence(char=opening[0], length=opening[1], opener=body)
     return None
 
 
