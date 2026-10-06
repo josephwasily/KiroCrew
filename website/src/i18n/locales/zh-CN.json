@@ -8046,7 +8046,10 @@
       "rename": "重命名",
       "reveal_in_sidebar": "在侧边栏中显示",
       "tags": "标签…",
-      "unpin": "取消置顶"
+      "unpin": "取消置顶",
+      "mute_sessions_it_opens": "静音此会话打开的会话",
+      "unmute_sessions_it_opens": "取消静音此会话打开的会话",
+      "mute_sessions_it_opens_failed": "无法更改静音设置"
     },
     "sessionColorSwatches": {
       "custom_color": "自定义颜色",
@@ -15383,7 +15386,10 @@
         "allow_system_notifications": "允许系统通知",
         "system_notifications_blocked": "已被浏览器阻止。请在该网站的权限设置中重新开启。",
         "show_banner_for_new_notifications": "新通知显示横幅",
-        "show_banner_for_new_notifications_description": "通知到达时，一张卡片会从顶栏下方滑入，随后收进铃铛。"
+        "show_banner_for_new_notifications_description": "通知到达时，一张卡片会从顶栏下方滑入，随后收进铃铛。",
+        "mute_sessions_opened_by_other_sessions": "静音由其他会话打开的会话",
+        "mute_sessions_opened_by_other_sessions_description": "静音由其他会话打开的任意会话的提示音、弹窗和未读标记——包括指挥者工作会话，以及 cron、应用和导入会话；打开方保留其信号，审批仍会通知。",
+        "mute_sessions_opened_save_failed": "无法保存此设置——浏览器阻止了本地存储，因此偏好设置保持不变。"
       },
       "privacyPanel": {
         "recordMetricsLabel": "记录指标",

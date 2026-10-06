@@ -13,6 +13,7 @@ import {
   loadSoundSettings, saveSoundSettings, playPreset, presetForKind,
 } from '../../hooks/useNotificationSound'
 import { loadChatCompleteNotify, saveChatCompleteNotify } from '../../hooks/chatCompleteNotify'
+import { loadMuteOpenedGlobal, saveMuteOpenedGlobal } from '../../hooks/sessionMute'
 import { loadBannerEnabled, saveBannerEnabled } from '../../hooks/notificationBanner'
 import { loadUnreadOnAttention, saveUnreadOnAttention } from '../../hooks/unreadOnAttention'
 import { useNotificationPermission } from '../../hooks/useNotificationPermission'
@@ -271,6 +272,11 @@ function SystemNotificationsRow() {
 export function NotificationsPanel({ basePath }: { basePath?: string } = {}) {
   const [settings, setSettings] = useState(() => loadSoundSettings())
   const [notifyChatComplete, setNotifyChatComplete] = useState(() => loadChatCompleteNotify())
+  const [muteOpenedGlobal, setMuteOpenedGlobal] = useState(() => loadMuteOpenedGlobal())
+  // Set when a mute-preference write is rejected (localStorage disabled/full):
+  // the toggle keeps its prior value AND the failure is rendered, instead of a
+  // silent no-op where the switch and the attention gate could disagree.
+  const [muteOpenedSaveFailed, setMuteOpenedSaveFailed] = useState(false)
   const [bannerEnabled, setBannerEnabled] = useState(() => loadBannerEnabled())
   const [unreadOnAttention, setUnreadOnAttention] = useState(() => loadUnreadOnAttention())
 
@@ -424,6 +430,32 @@ export function NotificationsPanel({ basePath }: { basePath?: string } = {}) {
             checked={unreadOnAttention}
             onChange={v => { if (saveUnreadOnAttention(v)) setUnreadOnAttention(v) }}
           />
+          {/* The global half of "mute the sessions a conductor opens".
+              When on, ANY session opened by another session (non-empty
+              created_by) is muted for attention, without needing the per-row
+              rule set on each creator. */}
+          <SettingsToggle
+            label={i18nT('pages.settings.notificationsPanel.mute_sessions_opened_by_other_sessions')}
+            hint={i18nT('pages.settings.notificationsPanel.mute_sessions_opened_by_other_sessions_description')}
+            checked={muteOpenedGlobal}
+            onChange={v => {
+              if (saveMuteOpenedGlobal(v)) {
+                setMuteOpenedGlobal(v)
+                setMuteOpenedSaveFailed(false)
+              } else {
+                // Write rejected: keep the toggle on its prior value and surface
+                // the failure, rather than paint a state the attention gate (which
+                // reads the unwritten localStorage) never actually sees.
+                setMuteOpenedSaveFailed(true)
+              }
+            }}
+          />
+          {muteOpenedSaveFailed && (
+            <ErrorNotice
+              message={i18nT('pages.settings.notificationsPanel.mute_sessions_opened_save_failed')}
+              askAgent
+            />
+          )}
         </SettingsCard>
       </SettingsSection>
           )

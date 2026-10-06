@@ -8165,7 +8165,10 @@
       "rename": "Umbenennen",
       "reveal_in_sidebar": "In der Seitenleiste anzeigen",
       "tags": "Tags…",
-      "unpin": "Entpinnen"
+      "unpin": "Entpinnen",
+      "mute_sessions_it_opens": "Von dieser Sitzung geöffnete Sitzungen stummschalten",
+      "unmute_sessions_it_opens": "Stummschaltung für von dieser Sitzung geöffnete Sitzungen aufheben",
+      "mute_sessions_it_opens_failed": "Stummschaltung konnte nicht geändert werden"
     },
     "sessionColorSwatches": {
       "custom_color": "Benutzerdefinierte Farbe",
@@ -15617,7 +15620,10 @@
         "allow_system_notifications": "Systembenachrichtigungen erlauben",
         "system_notifications_blocked": "Im Browser blockiert. Schalte sie in den Berechtigungen der Website wieder ein.",
         "show_banner_for_new_notifications": "Banner für neue Benachrichtigungen anzeigen",
-        "show_banner_for_new_notifications_description": "Bei einer neuen Benachrichtigung gleitet eine Karte unter der oberen Leiste ein und verschwindet dann in der Glocke."
+        "show_banner_for_new_notifications_description": "Bei einer neuen Benachrichtigung gleitet eine Karte unter der oberen Leiste ein und verschwindet dann in der Glocke.",
+        "mute_sessions_opened_by_other_sessions": "Von anderen Sitzungen geöffnete Sitzungen stummschalten",
+        "mute_sessions_opened_by_other_sessions_description": "Schaltet Töne, Toasts und Ungelesen-Markierungen jeder von einer anderen Sitzung geöffneten Sitzung stumm — Conductor-Worker sowie Cron-, App- und Import-Sitzungen; die öffnende Sitzung behält ihre Signale und Freigaben benachrichtigen weiterhin.",
+        "mute_sessions_opened_save_failed": "Diese Einstellung konnte nicht gespeichert werden — dein Browser hat den lokalen Speicher blockiert, daher blieb die Einstellung unverändert."
       },
       "privacyPanel": {
         "recordMetricsDescription": "Leistungsmetriken auf diesem Rechner erfassen.",

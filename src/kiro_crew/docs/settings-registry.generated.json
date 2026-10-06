@@ -1228,6 +1228,13 @@
       "description": "A background session is marked unread when its agent finishes or waits on your answer, instead of on every new message."
     },
     {
+      "id": "notifications.mute-sessions-opened-by-other-sessions",
+      "label": "Mute sessions opened by other sessions",
+      "tab": "notifications",
+      "route": "/settings/notifications/alerts?highlight=notifications.mute-sessions-opened-by-other-sessions",
+      "description": "Silences chimes, toasts and unread badges from any session another session opened — conductor workers, and also cron, app and import sessions; the opener keeps its signals and approvals still notify."
+    },
+    {
       "id": "notifications.notify-when-a-background-chat-finishes",
       "label": "Notify when a background chat finishes",
       "tab": "notifications",

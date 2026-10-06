@@ -2079,6 +2079,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "notifications.mute-sessions-opened-by-other-sessions",
+    "label": "Mute sessions opened by other sessions",
+    "labelKey": "pages.settings.notificationsPanel.mute_sessions_opened_by_other_sessions",
+    "description": "Silences chimes, toasts and unread badges from any session another session opened — conductor workers, and also cron, app and import sessions; the opener keeps its signals and approvals still notify.",
+    "tab": "notifications",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "alerts"
+    }
+  },
+  {
     "id": "notifications.notify-when-a-background-chat-finishes",
     "label": "Notify when a background chat finishes",
     "labelKey": "pages.settings.notificationsPanel.notify_when_a_background_chat_finishes",

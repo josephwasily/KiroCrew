@@ -8284,7 +8284,10 @@
       "rename": "Renommer",
       "reveal_in_sidebar": "Afficher dans la barre latérale",
       "tags": "Étiquettes…",
-      "unpin": "Désépingler"
+      "unpin": "Désépingler",
+      "mute_sessions_it_opens": "Masquer les sessions ouvertes par celle-ci",
+      "unmute_sessions_it_opens": "Réactiver les sessions ouvertes par celle-ci",
+      "mute_sessions_it_opens_failed": "Impossible de modifier le réglage de sourdine"
     },
     "sessionColorSwatches": {
       "custom_color": "Couleur personnalisée",
@@ -15851,7 +15854,10 @@
         "allow_system_notifications": "Autoriser les notifications système",
         "system_notifications_blocked": "Bloquées par votre navigateur. Réactivez-les dans les autorisations du site.",
         "show_banner_for_new_notifications": "Afficher une bannière pour les nouvelles notifications",
-        "show_banner_for_new_notifications_description": "À l’arrivée d’une notification, une carte glisse sous la barre supérieure puis se range dans la cloche."
+        "show_banner_for_new_notifications_description": "À l’arrivée d’une notification, une carte glisse sous la barre supérieure puis se range dans la cloche.",
+        "mute_sessions_opened_by_other_sessions": "Masquer les sessions ouvertes par d'autres sessions",
+        "mute_sessions_opened_by_other_sessions_description": "Coupe les sons, notifications et badges non lus de toute session ouverte par une autre session — workers de conducteur, ainsi que les sessions cron, app et import ; la session d'origine garde ses signaux et les approbations notifient toujours.",
+        "mute_sessions_opened_save_failed": "Impossible d'enregistrer ce réglage — ton navigateur a bloqué le stockage local, la préférence est donc restée inchangée."
       },
       "privacyPanel": {
         "recordMetricsDescription": "Collecter les métriques de performance sur cette machine.",

@@ -8284,7 +8284,10 @@
       "rename": "Rinomina",
       "reveal_in_sidebar": "Mostra nella barra laterale",
       "tags": "Tag…",
-      "unpin": "Non fissare"
+      "unpin": "Non fissare",
+      "mute_sessions_it_opens": "Silenzia le sessioni aperte da questa",
+      "unmute_sessions_it_opens": "Riattiva le sessioni aperte da questa",
+      "mute_sessions_it_opens_failed": "Impossibile modificare l'impostazione di silenzio"
     },
     "sessionColorSwatches": {
       "custom_color": "Colore personalizzato",
@@ -15851,7 +15854,10 @@
         "allow_system_notifications": "Consenti le notifiche di sistema",
         "system_notifications_blocked": "Bloccate nel browser. Riattivale nelle autorizzazioni del sito.",
         "show_banner_for_new_notifications": "Mostra un banner per le nuove notifiche",
-        "show_banner_for_new_notifications_description": "Quando arriva una notifica, una scheda scivola sotto la barra superiore e poi si ritira nella campanella."
+        "show_banner_for_new_notifications_description": "Quando arriva una notifica, una scheda scivola sotto la barra superiore e poi si ritira nella campanella.",
+        "mute_sessions_opened_by_other_sessions": "Silenzia le sessioni aperte da altre sessioni",
+        "mute_sessions_opened_by_other_sessions_description": "Silenzia suoni, avvisi e indicatori di non letto di qualsiasi sessione aperta da un'altra sessione — worker del conductor, e anche sessioni cron, app e import; la sessione che la apre mantiene i suoi segnali e le approvazioni continuano a notificare.",
+        "mute_sessions_opened_save_failed": "Impossibile salvare questa impostazione: il browser ha bloccato l'archiviazione locale, quindi la preferenza è rimasta invariata."
       },
       "privacyPanel": {
         "recordMetricsLabel": "Registra le metriche",

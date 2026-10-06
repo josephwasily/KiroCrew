@@ -8046,7 +8046,10 @@
       "rename": "이름 변경",
       "reveal_in_sidebar": "사이드바에서 보기",
       "tags": "태그…",
-      "unpin": "고정 해제"
+      "unpin": "고정 해제",
+      "mute_sessions_it_opens": "이 세션이 여는 세션 음소거",
+      "unmute_sessions_it_opens": "이 세션이 여는 세션 음소거 해제",
+      "mute_sessions_it_opens_failed": "음소거 설정을 변경하지 못했습니다"
     },
     "sessionColorSwatches": {
       "custom_color": "사용자 지정 색상",
@@ -15395,7 +15398,10 @@
         "allow_system_notifications": "시스템 알림 허용",
         "system_notifications_blocked": "브라우저에서 차단되었습니다. 사이트 권한 설정에서 다시 켜세요.",
         "show_banner_for_new_notifications": "새 알림을 배너로 표시",
-        "show_banner_for_new_notifications_description": "알림이 오면 카드가 상단 바 아래로 미끄러져 나타난 뒤 벨 안으로 들어갑니다."
+        "show_banner_for_new_notifications_description": "알림이 오면 카드가 상단 바 아래로 미끄러져 나타난 뒤 벨 안으로 들어갑니다.",
+        "mute_sessions_opened_by_other_sessions": "다른 세션이 연 세션 음소거",
+        "mute_sessions_opened_by_other_sessions_description": "다른 세션이 연 모든 세션(컨덕터 워커, 그리고 cron·앱·가져오기 세션 포함)의 알림음, 토스트, 읽지 않음 배지를 음소거합니다. 연 세션은 신호를 유지하며 승인은 계속 알립니다.",
+        "mute_sessions_opened_save_failed": "이 설정을 저장하지 못했습니다 — 브라우저가 로컬 저장소를 차단하여 설정이 변경되지 않았습니다."
       },
       "postureDisclosure": {
         "filter": "{{label}} 필터",

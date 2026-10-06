@@ -8284,7 +8284,10 @@
       "rename": "Cambiar el nombre",
       "reveal_in_sidebar": "Mostrar en la barra lateral",
       "tags": "Etiquetas…",
-      "unpin": "Dejar de fijar"
+      "unpin": "Dejar de fijar",
+      "mute_sessions_it_opens": "Silenciar las sesiones que abre esta",
+      "unmute_sessions_it_opens": "Reactivar las sesiones que abre esta",
+      "mute_sessions_it_opens_failed": "No se pudo cambiar el ajuste de silencio"
     },
     "sessionColorSwatches": {
       "custom_color": "Color personalizado",
@@ -15851,7 +15854,10 @@
         "allow_system_notifications": "Permitir notificaciones del sistema",
         "system_notifications_blocked": "Bloqueadas en tu navegador. Vuelve a activarlas en los permisos del sitio.",
         "show_banner_for_new_notifications": "Mostrar un banner con las notificaciones nuevas",
-        "show_banner_for_new_notifications_description": "Cuando llega una notificación, una tarjeta se desliza bajo la barra superior y luego se recoge en la campana."
+        "show_banner_for_new_notifications_description": "Cuando llega una notificación, una tarjeta se desliza bajo la barra superior y luego se recoge en la campana.",
+        "mute_sessions_opened_by_other_sessions": "Silenciar las sesiones abiertas por otras sesiones",
+        "mute_sessions_opened_by_other_sessions_description": "Silencia sonidos, avisos e indicadores de no leído de cualquier sesión abierta por otra sesión — trabajadores de conductor, y también sesiones de cron, app e importación; la sesión que la abre conserva sus señales y las aprobaciones siguen notificando.",
+        "mute_sessions_opened_save_failed": "No se pudo guardar este ajuste: tu navegador bloqueó el almacenamiento local, así que la preferencia quedó sin cambios."
       },
       "privacyPanel": {
         "recordMetricsLabel": "Registrar métricas",

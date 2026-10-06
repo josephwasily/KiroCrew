@@ -8284,7 +8284,10 @@
       "rename": "Renomear",
       "reveal_in_sidebar": "Mostrar na barra lateral",
       "tags": "Etiquetas…",
-      "unpin": "Desafixar"
+      "unpin": "Desafixar",
+      "mute_sessions_it_opens": "Silenciar sessões que esta abre",
+      "unmute_sessions_it_opens": "Reativar sessões que esta abre",
+      "mute_sessions_it_opens_failed": "Não foi possível alterar a configuração de silêncio"
     },
     "sessionColorSwatches": {
       "custom_color": "Cor personalizada",
@@ -15851,7 +15854,10 @@
         "allow_system_notifications": "Permitir notificações do sistema",
         "system_notifications_blocked": "Bloqueadas no seu navegador. Reative-as nas permissões do site.",
         "show_banner_for_new_notifications": "Mostrar um banner para novas notificações",
-        "show_banner_for_new_notifications_description": "Quando chega uma notificação, um cartão desliza sob a barra superior e depois se recolhe no sino."
+        "show_banner_for_new_notifications_description": "Quando chega uma notificação, um cartão desliza sob a barra superior e depois se recolhe no sino.",
+        "mute_sessions_opened_by_other_sessions": "Silenciar sessões abertas por outras sessões",
+        "mute_sessions_opened_by_other_sessions_description": "Silencia sons, avisos e selos de não lido de qualquer sessão aberta por outra sessão — trabalhadores de maestro, e também sessões de cron, app e importação; a sessão de origem mantém seus sinais e as aprovações continuam a notificar.",
+        "mute_sessions_opened_save_failed": "Não foi possível salvar esta configuração — seu navegador bloqueou o armazenamento local, então a preferência ficou inalterada."
       },
       "privacyPanel": {
         "recordMetricsLabel": "Registrar métricas",
