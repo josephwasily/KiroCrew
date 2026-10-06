@@ -1292,7 +1292,8 @@ class TestMacOSPlistRendering:
 
         assert plist_path.exists()
         called = [c.args[0] for c in proc.call_args_list]
-        assert ["launchctl", "load", "-w", str(plist_path)] in called
+        uid = getattr(os, "getuid", lambda: -1)()
+        assert ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)] in called
 
 
 class TestControllerDispatch:
@@ -1407,23 +1408,21 @@ class TestControllerDispatch:
             "kiro_crew.service.controller.current_platform",
             return_value=Platform.LAUNCHD,
         ), patch.object(svc_macos, "is_active", return_value=True), patch.object(
-            svc_macos, "stop"
+            svc_macos, "stop", return_value=True
         ) as mock_stop:
             assert controller.stop_service() is True
         mock_stop.assert_called_once()
 
-    def test_stop_service_returns_false_when_macos_inactive(self):
+    def test_stop_service_returns_false_when_macos_has_nothing_loaded(self):
         from kiro_crew.service import controller
         from kiro_crew.service import macos as svc_macos
 
         with patch(
             "kiro_crew.service.controller.current_platform",
             return_value=Platform.LAUNCHD,
-        ), patch.object(svc_macos, "is_active", return_value=False), patch.object(
-            svc_macos, "stop"
-        ) as mock_stop:
+        ), patch.object(svc_macos, "stop", return_value=False) as mock_stop:
             assert controller.stop_service() is False
-        mock_stop.assert_not_called()
+        mock_stop.assert_called_once()
 
     def test_stop_service_unsupported_returns_false(self):
         from kiro_crew.service import controller
@@ -3944,21 +3943,23 @@ class TestMacOSControlPaths:
 
     def test_install_unloads_existing_plist_before_writing(self, tmp_path, monkeypatch):
         """Re-running install on a host that already has the plist loaded
-        should unload first, then write+load. Otherwise the new plist
-        wouldn't take effect."""
+        should boot it out first, then write+bootstrap. Otherwise the new
+        plist wouldn't take effect."""
         from kiro_crew.service import macos as svc_macos
 
         plist_dir = tmp_path / "LaunchAgents"
         plist_path = plist_dir / f"{LAUNCHD_LABEL}.plist"
         log_dir = tmp_path / "Logs"
         plist_dir.mkdir(parents=True)
-        # Pre-create the plist so install hits the unload-first branch.
+        # Pre-create the plist so install hits the bootout-first branch.
         plist_path.write_text("<plist/>")
         monkeypatch.setattr(svc_macos, "PLIST_DIR", plist_dir)
         monkeypatch.setattr(svc_macos, "PLIST_PATH", plist_path)
         monkeypatch.setattr(svc_macos, "LOG_DIR", log_dir)
         monkeypatch.setattr(svc_macos, "STDOUT_LOG", log_dir / "gateway.log")
         monkeypatch.setattr(svc_macos, "STDERR_LOG", log_dir / "gateway.err")
+        # Every stubbed `print` answers "still loaded"; skip the settle wait.
+        monkeypatch.setattr(svc_macos, "_BOOTOUT_SETTLE_SECS", 0.0)
 
         ok = MagicMock(returncode=0, stdout="", stderr="")
         with patch(
@@ -3969,12 +3970,12 @@ class TestMacOSControlPaths:
         ) as run:
             svc_macos.install()
         called = [c.args[0] for c in run.call_args_list]
-        # The unload must come BEFORE the load for the new plist to take effect.
+        # The bootout must come BEFORE the bootstrap for the new plist to take effect.
         unload_idx = next(
-            i for i, c in enumerate(called) if c[:2] == ["launchctl", "unload"]
+            i for i, c in enumerate(called) if c[:2] == ["launchctl", "bootout"]
         )
         load_idx = next(
-            i for i, c in enumerate(called) if c[:2] == ["launchctl", "load"]
+            i for i, c in enumerate(called) if c[:2] == ["launchctl", "bootstrap"]
         )
         assert unload_idx < load_idx
 
@@ -3999,7 +4000,8 @@ class TestMacOSControlPaths:
             svc_macos.uninstall()
         assert not plist_path.exists()
         called = [c.args[0] for c in run.call_args_list]
-        assert ["launchctl", "unload", "-w", str(plist_path)] in called
+        uid = getattr(os, "getuid", lambda: -1)()
+        assert ["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"] in called
         assert sentinel.read_text() == "user data"
 
     def test_uninstall_idempotent_when_plist_missing(self, tmp_path, monkeypatch):
@@ -4046,9 +4048,9 @@ class TestMacOSControlPaths:
 
     def test_stop_unloads_plist_when_present(self, tmp_path, monkeypatch):
         # ``launchctl stop`` would just send SIGTERM and KeepAlive would
-        # restart the agent immediately. ``unload`` (without ``-w``) is
-        # the supported way to actually stop the running gateway, while
-        # leaving the plist enabled for the next login.
+        # restart the agent immediately. ``bootout`` removes the job from its
+        # domain, so there is nothing to respawn, while leaving the plist
+        # enabled for the next login.
         from kiro_crew.service import macos as svc_macos
 
         plist_path = tmp_path / "agent.plist"
@@ -4058,9 +4060,10 @@ class TestMacOSControlPaths:
         with patch(
             "kiro_crew.service.macos.subprocess.run", return_value=ok
         ) as run:
-            svc_macos.stop()
+            assert svc_macos.stop() is True
         called = [c.args[0] for c in run.call_args_list]
-        assert ["launchctl", "unload", str(plist_path)] in called
+        uid = getattr(os, "getuid", lambda: -1)()
+        assert ["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"] in called
         # Crucially, we should NOT have called `launchctl stop`.
         assert not any(c[:2] == ["launchctl", "stop"] for c in called)
 

@@ -304,10 +304,10 @@ def stop_service() -> bool:
             return True
         return False
     if plat == Platform.LAUNCHD:
-        if macos.is_active():
-            macos.stop()
-            return True
-        return False
+        # No is_active() gate: its ``list`` probe reads the CALLER's domain, so
+        # from SSH it misses a gui/<uid> job. stop() searches both domains and
+        # returns False when nothing is loaded or launchd refused the bootout.
+        return macos.stop()
     return False
 
 

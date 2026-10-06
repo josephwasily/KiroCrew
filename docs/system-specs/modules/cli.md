@@ -1870,10 +1870,26 @@ on crash, and starts on boot. Implemented in `src/kiro_crew/service/`.
     or unprivileged if the user is in `systemd-journal` / `adm`.
 - **macOS** (`current_platform() == LAUNCHD`):
   - Plist: `~/Library/LaunchAgents/dev.kirocrew.gateway.plist`
-  - Install: `launchctl load -w <plist>`. `RunAtLoad=true` and
+  - Install: `launchctl enable gui/<uid>/<label>` then
+    `launchctl bootstrap gui/<uid> <plist>`. `RunAtLoad=true` and
     `KeepAlive` ensure auto-start and crash recovery.
   - Stdout and stderr are written to
     `~/Library/Logs/KiroCrew/gateway.{log,err}`.
+  - Every verb names the `gui/<uid>` domain explicitly, so an install from
+    SSH lands where `restart` (`kickstart -k gui/<uid>/<label>`) and `stop`
+    address it; the legacy `load`/`unload` verbs act on the caller's
+    domain (`user/<uid>` from SSH). With nobody logged in at the desktop,
+    there is no `gui/<uid>` domain and install fails, naming that cause.
+    Reinstall first boots out an agent an older `load -w` left in
+    `gui/<uid>` or `user/<uid>` and waits for it to leave (`bootout` is
+    asynchronous); `enable` clears the persistent disabled override an older
+    `uninstall`'s `unload -w` wrote.
+  - Stop and uninstall: `launchctl bootout <domain>/<label>`, searching
+    `gui/<uid>` then `user/<uid>`. Removing the job leaves nothing for
+    `KeepAlive` to respawn; stop keeps the plist and its enabled state for
+    the next login. `stop()` returns whether launchd accepted the bootout
+    and `stop_service()` passes that on, so `kirocrew stop` never reports a
+    refused bootout as a stop.
 - **Other platforms**: install/uninstall return exit code 2 with a
   message pointing to manual setup.
 

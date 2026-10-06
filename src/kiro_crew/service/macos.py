@@ -1,7 +1,8 @@
 """launchd LaunchAgent generation and control for macOS.
 
 The plist lives at ``~/Library/LaunchAgents/dev.kirocrew.gateway.plist``
-and is loaded via ``launchctl load -w``. It keeps the gateway continuously
+and is bootstrapped into the ``gui/<uid>`` domain with
+``launchctl bootstrap``. It keeps the gateway continuously
 running. Dev Fleet's restart is launchd-owned: SIGTERM first, then SIGKILL only
 after the finite ``ExitTimeOut`` if cooperative shutdown does not finish.
 """
@@ -13,10 +14,12 @@ import os
 import plistlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.gateway_shutdown_budget import TOTAL_SHUTDOWN_BUDGET_SECS
+from kiro_crew.pod import launchd as _pod_launchd
 from kiro_crew.service.common import (
     LAUNCHD_LABEL,
     kirocrew_bin,
@@ -351,18 +354,75 @@ def ensure_live_program() -> bool:
     return True
 
 
-def install() -> None:
-    """Write the plist and load+start the agent.
+#: How long :func:`install` waits for a ``bootout`` to take effect before it
+#: bootstraps the new plist. ``bootout`` returns before launchd has finished
+#: unloading the job, and a ``bootstrap`` of a label that is still loaded fails.
+_BOOTOUT_SETTLE_SECS = 10.0
+_BOOTOUT_POLL_SECS = 0.2
 
-    Idempotent — unloads first if already loaded so the new plist takes
-    effect without leaving the prior agent stale. Also (re)writes
+
+def _uid() -> int:
+    # ``os.getuid`` is absent on Windows; the guard keeps the module importable
+    # there (the test suite imports it on every platform), as in restart().
+    return getattr(os, "getuid", lambda: -1)()
+
+
+def _legacy_domains() -> tuple[str, ...]:
+    """Domains a legacy ``load -w`` install may hold the agent in.
+
+    ``gui/<uid>`` for an install from a normal login session, ``user/<uid>``
+    for one from SSH. Searched so an agent installed by an older version is
+    still found, stopped and reinstalled cleanly.
+    """
+    return (_pod_launchd.domain(), f"user/{_uid()}")
+
+
+def _bootout(*, wait: bool) -> bool:
+    """``bootout`` the agent from whichever domain holds it.
+
+    Returns True when launchd accepted the bootout, False when the agent was
+    not loaded in any searched domain or launchd refused (the refusal is
+    logged). With ``wait``, polls until the label has left the domain, because
+    ``bootout`` is asynchronous.
+    """
+    for domain in _legacy_domains():
+        target = f"{domain}/{LAUNCHD_LABEL}"
+        res = _launchctl("bootout", target)
+        if res.returncode == 0:
+            if wait:
+                deadline = time.monotonic() + _BOOTOUT_SETTLE_SECS
+                while time.monotonic() < deadline:
+                    if _pod_launchd._service_absent(_launchctl("print", target)):
+                        break
+                    time.sleep(_BOOTOUT_POLL_SECS)
+            return True
+        if not _pod_launchd._service_absent(res):
+            log.warning(
+                "launchctl bootout %s refused (rc=%s): %s",
+                target, res.returncode, (res.stderr or res.stdout).strip(),
+            )
+            return False
+    return False
+
+
+def install() -> None:
+    """Write the plist and bootstrap the agent into ``gui/<uid>``.
+
+    Idempotent — boots out an already-loaded agent first (from either domain an
+    older ``load -w`` could have used) so the new plist takes effect without
+    leaving the prior agent stale. Also (re)writes
     :data:`LIVE_PROGRAM`: the plist executes that launcher, so an absent or
     non-executable one would leave the agent with nothing to run. Re-running
     ``service install`` is therefore also the documented repair for a deleted
     application-support directory.
 
+    The domain is explicit, so an install from SSH lands where ``is_active``,
+    ``status``, ``restart`` and ``stop`` address it. ``enable`` stands in for
+    ``load -w``'s clearing of a persistent disabled override (which an older
+    ``uninstall``'s ``unload -w`` wrote).
+
     Raises :class:`ServiceInstallError` with a human-readable message if
-    ``launchctl load`` fails. The CLI catches this and prints the message
+    ``launchctl bootstrap`` fails. The CLI catches this and prints the message
     instead of letting a CalledProcessError surface.
     """
     PLIST_DIR.mkdir(parents=True, exist_ok=True)
@@ -371,22 +431,33 @@ def install() -> None:
     # exist fails to spawn and KeepAlive would retry it in a tight loop.
     write_live_program(render_live_program(kirocrew_bin()))
     if PLIST_PATH.exists():
-        _launchctl("unload", "-w", str(PLIST_PATH))
+        _bootout(wait=True)
     _write_plist_atomic(render_plist())
-    load_res = _launchctl("load", "-w", str(PLIST_PATH))
+    domain = _pod_launchd.domain()
+    _launchctl("enable", f"{domain}/{LAUNCHD_LABEL}")
+    load_res = _launchctl("bootstrap", domain, str(PLIST_PATH))
     if load_res.returncode != 0:
+        reason = (load_res.stderr or load_res.stdout).strip()
+        # Bootstrapping into gui/<uid> from SSH while nobody is logged in at
+        # the desktop answers "125: Domain does not support specified action".
+        hint = (
+            f"   The {domain} domain exists only while you are logged in to "
+            f"this Mac's desktop; log in there, then re-run the install.\n"
+            if "domain" in reason.lower()
+            else ""
+        )
         raise ServiceInstallError(
-            f"`launchctl load` failed: "
-            f"{(load_res.stderr or load_res.stdout).strip()}\n"
+            f"`launchctl bootstrap {domain}` failed: {reason}\n"
             f"   Plist: {PLIST_PATH}\n"
+            f"{hint}"
             f"   Tail the agent logs at {STDOUT_LOG} / {STDERR_LOG} for details."
         )
 
 
 def uninstall() -> None:
-    """Unload and remove the plist and the live-gateway launcher. Idempotent."""
+    """Boot out and remove the plist and the live-gateway launcher. Idempotent."""
     if PLIST_PATH.exists():
-        _launchctl("unload", "-w", str(PLIST_PATH))
+        _bootout(wait=False)
         PLIST_PATH.unlink()
     # Drop the launcher too: leaving it behind would make a later `status` look
     # like a partially installed service.
@@ -411,15 +482,18 @@ def is_active() -> bool:
     return True  # `list <label>` succeeded; treat as active even if PID line absent
 
 
-def stop() -> None:
+def stop() -> bool:
     """Stop the agent without triggering its ``KeepAlive`` restart.
 
     Dev Fleet restarts by signalling the job so ``KeepAlive`` respawns it;
-    operator stop unloads the job from the current domain while leaving it
-    enabled for the next login.
+    operator stop boots the job out of its domain, so there is nothing left for
+    ``KeepAlive`` to respawn, while the plist and its enabled state stay in
+    place for the next login. Returns True only when launchd accepted the
+    bootout, so no caller reports a stop that was refused.
     """
-    if PLIST_PATH.exists():
-        _launchctl("unload", str(PLIST_PATH))
+    if not PLIST_PATH.exists():
+        return False
+    return _bootout(wait=False)
 
 
 def restart() -> bool:
