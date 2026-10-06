@@ -9475,6 +9475,20 @@
         "tokens_count_one": "{{count}} access token",
         "tokens_count_other": "{{count}} access tokens",
         "could_not_read_webhook_status": "Could not read webhook status — check that the gateway is running"
+      },
+      "headlessCrewChat": {
+        "title": "Chat with this crew",
+        "empty_state": "{{name}} has no dashboard of its own. Send it a message here and the reply streams back through this gateway.",
+        "placeholder": "Message this crew",
+        "connect_first": "Connect this crew first",
+        "send": "Send",
+        "you": "You",
+        "empty_reply": "The crew answered, but the reply carried no text.",
+        "unreachable": "The crew did not answer. Check the connection and try again.",
+        "thread_label": "Conversation",
+        "secret_unavailable": "This crew's credential could not be read. Check its deploy finished, then try again.",
+        "resume_failed": "This crew was asleep and could not be woken. Try again, or reconnect it.",
+        "message_too_large": "That message is too long. Shorten it and send again."
       }
     },
     "settingsPage": {

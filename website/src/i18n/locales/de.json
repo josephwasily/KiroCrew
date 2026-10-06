@@ -16813,6 +16813,20 @@
         "remove_confirm": "{{provider}}-OAuth-App entfernen? Client ID und gespeichertes Secret werden gelöscht, und {{provider}} kann sich erst wieder verbinden, wenn du sie erneut einträgst.",
         "remove_confirm_action": "OAuth-App entfernen",
         "cancel": "Abbrechen"
+      },
+      "headlessCrewChat": {
+        "title": "Mit dieser Crew chatten",
+        "empty_state": "{{name}} hat kein eigenes Dashboard. Sende hier eine Nachricht; die Antwort wird über dieses Gateway gestreamt.",
+        "placeholder": "Nachricht an diese Crew",
+        "connect_first": "Verbinde diese Crew zuerst",
+        "send": "Senden",
+        "you": "Du",
+        "empty_reply": "Die Crew hat geantwortet, die Antwort enthielt aber keinen Text.",
+        "unreachable": "Die Crew hat nicht geantwortet. Prüfe die Verbindung und versuche es erneut.",
+        "thread_label": "Unterhaltung",
+        "secret_unavailable": "Die Anmeldedaten dieser Crew konnten nicht gelesen werden. Prufe, ob ihr Deploy fertig ist, und versuche es erneut.",
+        "resume_failed": "Diese Crew hat geschlafen und konnte nicht geweckt werden. Versuche es erneut oder verbinde sie neu.",
+        "message_too_large": "Diese Nachricht ist zu lang. Kuerze sie und sende sie erneut."
       }
     },
     "settingsPage": {

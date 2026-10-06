@@ -17067,6 +17067,20 @@
         "remove_confirm": "Rimuovere l’app OAuth di {{provider}}? Client ID e secret salvato vengono eliminati e {{provider}} non potrà connettersi finché non li inserisci di nuovo.",
         "remove_confirm_action": "Rimuovi app OAuth",
         "cancel": "Annulla"
+      },
+      "headlessCrewChat": {
+        "title": "Chatta con questa crew",
+        "empty_state": "{{name}} non ha un proprio pannello. Invia un messaggio qui e la risposta arriva in streaming attraverso questo gateway.",
+        "placeholder": "Messaggio a questa crew",
+        "connect_first": "Collega prima questa crew",
+        "send": "Invia",
+        "you": "Tu",
+        "empty_reply": "La crew ha risposto, ma la risposta non conteneva testo.",
+        "unreachable": "La crew non ha risposto. Controlla la connessione e riprova.",
+        "thread_label": "Conversazione",
+        "secret_unavailable": "Non e stato possibile leggere le credenziali di questa crew. Controlla che il deploy sia finito e riprova.",
+        "resume_failed": "Questa crew era sospesa e non e stato possibile riattivarla. Riprova o riconnettila.",
+        "message_too_large": "Questo messaggio e troppo lungo. Accorcialo e invialo di nuovo."
       }
     },
     "settingsPage": {

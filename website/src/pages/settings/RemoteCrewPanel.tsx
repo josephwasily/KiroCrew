@@ -87,6 +87,7 @@ import { parseErrorCode } from '../../utils/errorReport'
 import { reportInstanceFailure } from '../../utils/instanceFailureReport'
 import { readPersistedString, usePersistedString } from '../../hooks/usePersistedString'
 import { usePersistedBool } from '../../hooks/usePersistedBool'
+import { HeadlessCrewChat } from './HeadlessCrewChat'
 import { AUTO_CONNECT_KEY } from '../../hooks/useAutoConnectInstances'
 import { copyToClipboard } from '../../utils/clipboard'
 import { useAppDispatch, useAppSelector } from '../../store'
@@ -918,6 +919,12 @@ function CrewRow({
   // A fargate crew has no dashboard; while its forward is up, the card shows
   // the turn URL the status carries instead of offering something to open.
   const turnUrl = inst.connection_method === 'fargate' && connected ? inst.status?.turn_url || '' : ''
+  // Whether this crew is HEADLESS -- it serves a turn route and has no dashboard
+  // to embed -- is decided by the gateway, not re-derived here from the
+  // connection method. The EC2 lane and the MicroVM lane share the `ssm` method
+  // and only one of them is headless, so a client-side guess would offer a chat
+  // pane to a crew that has a dashboard and withhold it from one that does not.
+  const headless = inst.headless_crew === true
   return (
     <div className="py-2.5 border-b border-border last:border-b-0" data-crew-id={inst.id}>
     <div className="flex items-start justify-between gap-3">
@@ -1125,6 +1132,13 @@ function CrewRow({
       </div>
     </div>
     {turnUrl && <TurnUrlField url={turnUrl} crewName={inst.name} />}
+    {/* The pane a headless crew gets INSTEAD of an embedded dashboard. Rendered
+        whether or not the crew is connected: the input is disabled until it is,
+        and a pane that only appears once connected gives a user no way to see
+        that chatting is what this crew offers. */}
+    {headless && (
+      <HeadlessCrewChat instanceId={inst.id} crewName={inst.name} connected={connected} />
+    )}
     {/* BELOW the row header, and naming its crew. Rendered above the name it read
         as a page-level warning banner about the whole panel, and with several rows
         it attributed the sign-in to whichever crew the reader was looking at. */}
@@ -2757,7 +2771,16 @@ export function RemoteCrewPanel() {
                 launch={input => launchMutation.mutate({
                   provider_id: selectedProvisioner.id,
                   profile: input.profile ?? '',
-                  region: input.region ?? '',
+                  // `||`, not `??`: a provisioner form with no region field sends
+                  // an EMPTY STRING, not undefined, and every provisioner's
+                  // preflight refuses an empty region -- reported as
+                  // `region='' is not a region`, which reads as a malformed value
+                  // rather than an absent one. Falling back to the panel's own
+                  // region means a form that does not ask for one inherits the
+                  // account the reader already chose here. The gateway defaults
+                  // it too, from the operator's config; this is what keeps the
+                  // two from disagreeing about which region the reader picked.
+                  region: input.region || region,
                   size_key: input.size_key,
                 })}
                 launching={launchMutation.isPending}

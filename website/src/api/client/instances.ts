@@ -77,6 +77,11 @@ export interface InstanceView {
   via_remote_port?: number
   via_remote_id?: string
   was_connected: boolean
+  /** True when this crew serves a TURN route and has no dashboard to embed, so
+   *  the row offers the chat pane instead of an iframe. Decided by the gateway
+   *  from the provisioner, because two lanes share the `ssm` method and only one
+   *  of them is headless. */
+  headless_crew?: boolean
   status: InstanceTunnelStatus
 }
 

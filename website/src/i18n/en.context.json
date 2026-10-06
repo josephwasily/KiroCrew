@@ -655,6 +655,7 @@
     "pages.chatSidebar.close_blocked_one": "Tooltip, accessible name and row-menu item of the X on a session-tree card when the close would be refused: exactly one session in the tree is still running. Singular form.",
     "pages.chatSidebar.close_blocked_other": "Tooltip, accessible name and row-menu item of the X on a session-tree card when the close would be refused: several sessions in the tree are still running. Plural form; {{count}} includes this card when it runs.",
     "pages.chatSidebar.close_blocked_short_one": "Short visible label beside the X on a session-tree card whose close would be refused, singular: one session still running. Keep it very short, it sits on a compact button.",
-    "pages.chatSidebar.close_blocked_short_other": "Short visible label beside the X on a session-tree card whose close would be refused, plural: {{count}} sessions still running. Keep it very short, it sits on a compact button."
+    "pages.chatSidebar.close_blocked_short_other": "Short visible label beside the X on a session-tree card whose close would be refused, plural: {{count}} sessions still running. Keep it very short, it sits on a compact button.",
+    "pages.settings.headlessCrewChat.you": "Label on the operator's own message in the crew chat transcript, beside the crew's name on its replies. A speaker attribution in a two-party transcript, not the pronoun used in a sentence."
   }
 }

@@ -75,6 +75,7 @@ const UNMAPPED_PANELS: Record<string, string> = {
   'TelegramPanel.tsx': 'thin BotChannelSpec wrapper; BotChannelPanel fans its entries out to channel=telegram',
   'FeishuPanel.tsx': 'thin BotChannelSpec wrapper; BotChannelPanel fans its entries out to channel=feishu',
   'WeComPanel.tsx': 'thin BotChannelSpec wrapper; BotChannelPanel fans its entries out to channel=wecom',
+  'HeadlessCrewChat.tsx': 'a chat transcript and a message box for one remote crew that serves a turn route and has no dashboard to embed; it holds no persistent setting -- what it sends goes to that crew, not to a config path',
   'ImportPanel.tsx': 'single action button launching the import wizard; no persistent settings',
   'InstanceFormFields.tsx': 'per-instance CRUD form fields (add/edit crew), not global settings',
   'McpManagement.tsx': 'mounted only on the standalone Developer page — a settings deep link would be dead',
@@ -208,6 +209,10 @@ const WAIVED_BARE_CONTROLS: Record<string, { counts: BareCounts; reason: string 
   'ConnectBrowserSection.tsx': {
     counts: { Input: 1 },
     reason: 'attach-token credential field with Save/Clear semantics (manual: browser.attach-token)',
+  },
+  'HeadlessCrewChat.tsx': {
+    counts: { input: 1 },
+    reason: 'the message box for one crew. A composer, not a setting: it sends a turn and persists nothing, so a Settings* primitive would index a control that writes no config path',
   },
   'DecisionsCard.tsx': {
     counts: { input: 1 },
@@ -475,3 +480,4 @@ describe('settings coverage gate — Chat rail pages', () => {
     expect(entries[0].params).toBeUndefined()
   })
 })
+

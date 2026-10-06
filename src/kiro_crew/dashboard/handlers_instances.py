@@ -253,8 +253,18 @@ def _status_for(state: "DashboardState", instance_id: str) -> dict:
 
 def _instance_view(state: "DashboardState", inst) -> dict:
     """Registry record + live status, merged for the Manage panel. No token."""
+    from kiro_crew.dashboard.handlers_crew_turn import is_headless_crew
+
     view = inst.to_dict()
     view["status"] = _status_for(state, inst.id)
+    # Which SURFACE this crew gets. A crew that runs a full gateway is embedded
+    # as its own dashboard; a headless crew has none to embed and is chatted with
+    # through the turn pane. The frontend must not re-derive this from the
+    # connection method: the EC2 lane and the MicroVM lane both use ``ssm`` and
+    # only one of them is headless.
+    view["headless_crew"] = is_headless_crew(
+        view["status"], str(getattr(inst, "provisioner_id", "") or "")
+    )
     return view
 
 

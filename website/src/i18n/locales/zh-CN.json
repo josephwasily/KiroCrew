@@ -16559,6 +16559,20 @@
         "remove_confirm": "移除 {{provider}} 的 OAuth 应用？客户端 ID 和已保存的密钥会被删除，重新填写之前 {{provider}} 无法连接。",
         "remove_confirm_action": "移除 OAuth 应用",
         "cancel": "取消"
+      },
+      "headlessCrewChat": {
+        "title": "与这个 crew 聊天",
+        "empty_state": "{{name}} 没有自己的面板。在这里给它发消息，回复会通过本机 gateway 流式返回。",
+        "placeholder": "给这个 crew 发消息",
+        "connect_first": "请先连接这个 crew",
+        "send": "发送",
+        "you": "你",
+        "empty_reply": "crew 回复了，但内容为空。",
+        "unreachable": "crew 没有回应。请检查连接后重试。",
+        "thread_label": "会话",
+        "secret_unavailable": "无法读取该 crew 的凭据。请确认部署已完成后重试。",
+        "resume_failed": "这个 crew 处于挂起状态且无法唤醒。请重试，或重新连接它。",
+        "message_too_large": "这条消息太长了。请缩短后重新发送。"
       }
     },
     "settingsPage": {

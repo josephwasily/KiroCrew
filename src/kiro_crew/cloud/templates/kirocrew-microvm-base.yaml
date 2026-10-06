@@ -1,0 +1,462 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Shared scaffolding for Kiro Crew remote crews on AWS Lambda MicroVMs, in the
+  user's own AWS account: the bucket every crew's home is archived to, the
+  customer-managed key it is encrypted with, and the role a MicroVM's SSM agent
+  registers as a hybrid managed node under. One stack per account and region.
+
+  Deployed BY HAND, once, like kirocrew-fargate-base.yaml. The launcher never
+  creates a bucket or a key, and that is the point: a MicroVM lives at most eight
+  hours and the archive outlives every crew that writes to it, so the one
+  resource whose loss is unrecoverable is created by a deliberate act with a
+  stack behind it rather than as a side effect of someone's first launch.
+
+  Its outputs are the configuration home for the `microvm` block in
+  ~/.kiro/crew/cloud.json: ArchiveBucketName and ArchiveKmsKeyArn.
+
+# ---------------------------------------------------------------------------
+# Parameters. There is no networking here at all, and that is a property of the
+# platform rather than an omission: a MicroVM launched with the INTERNET_EGRESS
+# connector has no security group and no route table, and there is no
+# MicroVM-level control that narrows its outbound traffic. So this stack has
+# nothing to place and nothing to bound on the network side.
+# ---------------------------------------------------------------------------
+Parameters:
+  StackTag:
+    Type: String
+    Default: kirocrew
+    # Mirrors the other lanes' cap for the same reason: names derived from this
+    # tag are bounded by AWS resource-name limits, and a value that passes
+    # template validation but fails opaquely at resource creation is worse than
+    # one refused here.
+    AllowedPattern: "[a-z0-9-]{1,51}"
+    Description: Discovery tag value written as kirocrew:microvm.
+
+  ArchiveRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 365
+    # Kept in step with pack.ARCHIVE_RETENTION_SECONDS, which is the number the
+    # product's own expiry uses. The lifecycle rule here is the BACKSTOP: expiry
+    # runs on the owner's gateway, and a gateway that is never started again would
+    # otherwise leave the archive forever.
+    Description: >-
+      Days a stopped crew's archive is kept before S3 expires it. The product's
+      own expiry uses the same number; this rule is the backstop for an install
+      that is never started again.
+
+  SecretPathPrefix:
+    Type: String
+    Default: kirocrew/crew
+    Description: >-
+      Secrets Manager path prefix the guest may read, which must equal
+      microvm.secret_path_prefix in ~/.kiro/crew/cloud.json. The guest's role is
+      scoped to this prefix, so a config that names a different one is a launch
+      that ends at the secrets stage.
+    AllowedPattern: "^[A-Za-z0-9/_+=.@-]{1,200}$"
+
+Resources:
+  # --- The key. A customer-managed CMK rather than the S3-managed default,
+  #     because the bucket policy below denies a put that does not name THIS key
+  #     -- and a deny that names a specific key is the only form that cannot be
+  #     satisfied by an unencrypted or differently-encrypted write.
+  #
+  #     This is the largest standing cost in the lane, at roughly one dollar a
+  #     month, and it is the only one that exists whether or not a crew is
+  #     running. Stated plainly because the lane's whole argument is cost.
+  ArchiveKey:
+    Type: AWS::KMS::Key
+    # Retained with the bucket, and for the same reason it is. The bucket below
+    # is retained on stack delete and encrypted with THIS key, so a key that was
+    # not retained would leave the archives in place and unreadable -- the exact
+    # loss the bucket's retention exists to prevent, arriving by a different
+    # door. Recovery after that would be limited to cancelling the key's
+    # scheduled deletion before its waiting period ended.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Kiro Crew MicroVM crew archives (${StackTag})"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: kirocrew:microvm
+          Value: !Ref StackTag
+
+  ArchiveKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${StackTag}-microvm-archive"
+      TargetKeyId: !Ref ArchiveKey
+
+  # --- The bucket. Versioning is ON, and it is not ordinary hygiene here: every
+  #     write to a crew's archive is conditional on the ETag the previous write
+  #     returned, so the object's version history IS the crew's lineage. A
+  #     conditional write that was refused leaves the previous version intact,
+  #     and an owner recovering from a bad pack needs that version to still exist.
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    # Retained on stack delete. Deleting this stack must not be able to delete
+    # fourteen days of crew homes: the archives are the one thing in this lane
+    # that cannot be recreated, and a stack delete is exactly the operation
+    # someone runs while tidying up.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${StackTag}-microvm-archive-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              # wokeignore:rule=master -- the property name is S3's own, not ours
+              KMSMasterKeyID: !GetAtt ArchiveKey.Arn
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireStoppedCrewArchives
+            Status: Enabled
+            Prefix: crews/
+            ExpirationInDays: !Ref ArchiveRetentionDays
+            NoncurrentVersionExpirationInDays: !Ref ArchiveRetentionDays
+          - Id: AbandonMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: kirocrew:microvm
+          Value: !Ref StackTag
+
+  ArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArchiveBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # A put that names no key, or names a different one, is DENIED rather
+          # than silently stored under the bucket default. The lane's pack path
+          # passes the key explicitly for exactly this reason: an omitted key
+          # here is a 403 the owner can read, and a default-encrypted object
+          # would be an archive outside the key they chose.
+          - Sid: DenyPutWithWrongKmsKey
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource: !Sub "${ArchiveBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                "s3:x-amz-server-side-encryption-aws-kms-key-id": !GetAtt ArchiveKey.Arn
+          - Sid: DenyUnencryptedPut
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource: !Sub "${ArchiveBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                "s3:x-amz-server-side-encryption": "aws:kms"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ArchiveBucket.Arn
+              - !Sub "${ArchiveBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+  # --- The bucket a crew's image RECIPE is uploaded to, and the role Lambda
+  #     assumes to read it and run the build.
+  #
+  #     A crew's image is built rather than configured, from an AWS-managed base
+  #     plus that crew's own signed bundle -- the same two inputs the Fargate lane
+  #     builds a task definition from. The build runs on Lambda's capacity, so the
+  #     recipe has to be somewhere Lambda can read and the build needs a role to
+  #     read it with. Neither is created by a launch, for the reason the archive
+  #     bucket is not: a launch creating the thing that outlives it is how an
+  #     account accumulates resources nobody chose.
+  #
+  #     Recipes expire quickly. A recipe is an input to a build, not a record of
+  #     one: the image it produced carries its recipe digest as a tag, so the zip
+  #     has no job once the build finishes.
+  RecipeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${StackTag}-microvm-recipes-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRecipes
+            Status: Enabled
+            ExpirationInDays: 7
+          - Id: AbandonMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: kirocrew:microvm
+          Value: !Ref StackTag
+
+  ImageBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${StackTag}-microvm-build"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: read-the-recipe
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The recipe prefix and nothing else. No ListBucket: a build does
+              # not need to enumerate other crews' recipes, and a role that can
+              # is a role that can read them.
+              - Effect: Allow
+                Action: "s3:GetObject"
+                Resource: !Sub "${RecipeBucket.Arn}/recipes/*"
+        # Build logs. Required whenever CreateMicrovmImage is given a log group,
+        # and the failure without it has no timeout and no error: the image
+        # version stays PENDING with updatedAt equal to createdAt, the image
+        # stays CREATING, no log group is created, and nothing ever says why.
+        # Measured live -- over two hours in that state, against the same recipe
+        # that fails in 55 seconds with logging off. A build that cannot write
+        # its logs does not build without them; it does not build at all.
+        # Worse, it cannot be cleaned up: the version is the last one so it
+        # cannot be deleted, and the image is not in a deletable state, so the
+        # image NAME -- which is the recipe digest -- is burned for that content.
+        - PolicyName: write-build-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
+      Tags:
+        - Key: kirocrew:microvm
+          Value: !Ref StackTag
+
+  # --- The role a MicroVM's SSM agent registers as. One role for the lane, not
+  #     one per crew: a per-crew role buys containment BETWEEN crews, which
+  #     matters for a shared roster and is ceremony for one owner with one
+  #     archive prefix. The lane is single-owner today, and the day it is not is
+  #     the day this becomes one role per crew.
+  #
+  #     It grants the crew's own archive prefix, plus ListBucket BOUNDED to that
+  #     prefix by an s3:prefix condition.
+  #
+  #     The bounded list is load-bearing, not a convenience. Without ListBucket,
+  #     S3 answers a GetObject for a key that does NOT exist with AccessDenied
+  #     rather than NoSuchKey -- it will not confirm absence to a caller that
+  #     cannot list. The guest's restore reads that as "the archive is there and I
+  #     may not have it", so a FIRST launch (which has no archive yet) failed at
+  #     boot and the front then refused every turn with transcript_unavailable.
+  #     Measured live, on this role and on the execution role both.
+  #
+  #     The condition keeps the original reasoning intact: the guest can
+  #     enumerate keys under crews/ and nowhere else, which is the prefix it is
+  #     already allowed to read and write. It cannot enumerate the bucket.
+  HybridActivationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${StackTag}-microvm-crew"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: crew-archive
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The guest writes and reads its OWN archive. The conditional-write
+              # condition is enforced by S3 and not by this policy, so the policy's
+              # job is only to bound WHICH keys it can reach.
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                Resource: !Sub "${ArchiveBucket.Arn}/crews/*"
+              # Bounded list, so a GetObject for an absent key answers NoSuchKey
+              # instead of AccessDenied. See the comment above this role.
+              - Effect: Allow
+                Action: "s3:ListBucket"
+                Resource: !GetAtt ArchiveBucket.Arn
+                Condition:
+                  StringLike:
+                    "s3:prefix": "crews/*"
+              # DeleteObject is deliberately absent. Expiry is the owner's
+              # gateway's job and the bucket's lifecycle rule's job; a guest that
+              # could delete its archive could delete the thing that survives it.
+              - Effect: Allow
+                Action:
+                  - "kms:Encrypt"
+                  - "kms:Decrypt"
+                  - "kms:GenerateDataKey"
+                Resource: !GetAtt ArchiveKey.Arn
+        - PolicyName: crew-identity
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The guest's two secrets: the per-crew control secret and the Kiro
+              # identity beside it. This is the role's only identity, and the
+              # payload carries a secret REFERENCE rather than a value precisely
+              # so the guest reads them itself -- which it cannot do without this
+              # grant, and a launch without it ends at the secrets stage with a
+              # VM that bills and serves nothing.
+              #
+              # Scoped to the prefix the lane writes under. An operator who sets
+              # microvm.secret_path_prefix to something else must widen this
+              # resource to match; the default is what the lane uses when they
+              # set nothing.
+              - Effect: Allow
+                Action: "secretsmanager:GetSecretValue"
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/*"
+                  - Prefix: !Ref SecretPathPrefix
+              # The guest removes its OWN managed node on the way out. Without
+              # this, every terminated crew leaves an SSM node behind that the
+              # sweeper can only report, and the account accumulates one per
+              # launch.
+              #
+              # Unscoped because SSM does not support a resource condition on this
+              # action; the guest can only name an id, and the only id it holds is
+              # the one it registered as.
+              - Effect: Allow
+                Action: "ssm:DeregisterManagedInstance"
+                Resource: "*"
+      Tags:
+        - Key: kirocrew:microvm
+          Value: !Ref StackTag
+
+  # The role the PLATFORM assumes to run one MicroVM, as distinct from the role
+  # the guest's own SSM node registers under above.
+  #
+  # Required for logs, which is why it is not optional. ``run-microvm`` has its
+  # own ``--logging``, separate from the image build's, and refuses it with
+  # "Logging cannot be enabled without providing executionRoleArn". Without
+  # per-VM logging a launch that fails before the guest registers is INVISIBLE:
+  # the control plane shows an activation with zero registrations and a VM in
+  # RUNNING, and a MicroVM has no other channel out before it registers. Two
+  # launches were spent on a cause nobody could see.
+  #
+  # It carries the archive grants too, with the same bounded list. On one platform
+  # version the guest's effective identity was this role rather than the
+  # activation role -- injected ambiently -- so a grant present on only one of the
+  # two makes the restore work or not depending on which the platform hands the
+  # guest. Granting both the same bounded prefix removes that coin flip.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${StackTag}-microvm-exec"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: microvm-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
+        - PolicyName: crew-archive
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                Resource: !Sub "${ArchiveBucket.Arn}/crews/*"
+              - Effect: Allow
+                Action: "s3:ListBucket"
+                Resource: !GetAtt ArchiveBucket.Arn
+                Condition:
+                  StringLike:
+                    "s3:prefix": "crews/*"
+              - Effect: Allow
+                Action:
+                  - "kms:Encrypt"
+                  - "kms:Decrypt"
+                  - "kms:GenerateDataKey"
+                Resource: !GetAtt ArchiveKey.Arn
+      Tags:
+        - Key: kirocrew:microvm
+          Value: !Ref StackTag
+
+Outputs:
+  ArchiveBucketName:
+    Description: Write this as microvm.archive_bucket in ~/.kiro/crew/cloud.json.
+    Value: !Ref ArchiveBucket
+
+  ArchiveKmsKeyArn:
+    Description: Write this as microvm.kms_key_id in ~/.kiro/crew/cloud.json.
+    Value: !GetAtt ArchiveKey.Arn
+
+  RecipeBucketName:
+    Description: Write this as microvm.recipe_bucket in ~/.kiro/crew/cloud.json.
+    Value: !Ref RecipeBucket
+
+  ImageBuildRoleArn:
+    Description: Write this as microvm.build_role_arn in ~/.kiro/crew/cloud.json.
+    Value: !GetAtt ImageBuildRole.Arn
+
+  HybridActivationRoleArn:
+    Description: >-
+      Write this as microvm.activation_role_arn in ~/.kiro/crew/cloud.json. It is
+      the role an SSM hybrid activation registers a MicroVM's node under, and
+      ssm:CreateActivation refuses the call without it, so the lane treats it as
+      required rather than optional.
+    Value: !GetAtt HybridActivationRole.Arn
+
+  ExecutionRoleArn:
+    Description: >-
+      Write this as microvm.execution_role_arn in ~/.kiro/crew/cloud.json. The
+      role the platform runs a MicroVM as; run-microvm refuses --logging without
+      it, and without logging a launch that fails before the guest registers
+      leaves no trace anywhere.
+    Value: !GetAtt ExecutionRole.Arn

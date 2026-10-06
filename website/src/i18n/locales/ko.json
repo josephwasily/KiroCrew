@@ -16559,6 +16559,20 @@
         "remove_confirm": "{{provider}} OAuth 앱을 제거하시겠습니까? 클라이언트 ID와 저장된 시크릿이 삭제되며, 다시 입력하기 전까지 {{provider}}은(는) 연결할 수 없습니다.",
         "remove_confirm_action": "OAuth 앱 제거",
         "cancel": "취소"
+      },
+      "headlessCrewChat": {
+        "title": "이 크루와 대화",
+        "empty_state": "{{name}}에는 자체 대시보드가 없습니다. 여기에서 메시지를 보내면 이 게이트웨이를 통해 응답이 스트리밍됩니다.",
+        "placeholder": "이 크루에 메시지 보내기",
+        "connect_first": "먼저 이 크루를 연결하세요",
+        "send": "보내기",
+        "you": "나",
+        "empty_reply": "크루가 응답했지만 본문이 없습니다.",
+        "unreachable": "크루가 응답하지 않았습니다. 연결을 확인하고 다시 시도하세요.",
+        "thread_label": "대화",
+        "secret_unavailable": "이 크루의 자격 증명을 읽을 수 없습니다. 배포가 완료되었는지 확인한 뒤 다시 시도하세요.",
+        "resume_failed": "이 크루가 절전 상태였고 깨울 수 없었습니다. 다시 시도하거나 다시 연결하세요.",
+        "message_too_large": "메시지가 너무 깁니다. 줄여서 다시 보내세요."
       }
     },
     "settingsPage": {

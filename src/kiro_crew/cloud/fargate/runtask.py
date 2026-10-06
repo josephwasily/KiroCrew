@@ -135,7 +135,35 @@ DERIVED_ENV: frozenset[str] = frozenset(
 #: a value that would defeat something the definition already asserts:
 #: ``SMC_BUNDLE_DIR`` redirects which bundle the crew-name check reads, and
 #: ``SMC_FRONT_PORT`` moves the listener away from the declared ``portMappings``.
-REFUSED_ENV: frozenset[str] = frozenset({"SMC_BUNDLE_DIR", "SMC_FRONT_PORT"} | set(CREDENTIAL_ENV))
+#: ``SMC_FRONT_BIND`` is refused for the same class of reason and a sharper one:
+#: it decides which addresses the crew's own listener answers on, and on this lane
+#: the task's network placement has already decided that. A caller-supplied value
+#: could contradict the placement -- binding loopback on a task whose port mapping
+#: is the only way in makes the crew unreachable, and the failure looks like a
+#: crew that will not start rather than one that was told where to listen. The
+#: MicroVM lane sets it in the image, where the placement that needs it is known.
+#: ``SMC_REQUIRE_AUTH_ALL_ROUTES`` is refused rather than derived, and the
+#: distinction is the point. It decides whether the container serves its liveness
+#: route and its customer turn to a caller presenting no control secret, and on
+#: THIS lane the answer is already asserted by the request itself: the task is
+#: placed in the operator's own subnets behind their own security groups, which is
+#: what bounds who can reach the port, and the owner is handed the turn URL to
+#: point a client at. A caller-supplied value could contradict that in either
+#: direction -- turning the gate on takes that lane's chat down, because nothing on
+#: the gateway sends the secret, and the only lane that needs it on is one whose
+#: compute carries its own internet-reachable endpoint and which sets it on the
+#: image it builds rather than per task. So this request neither writes it nor
+#: accepts it, and the container's own default is the posture this placement
+#: already implies.
+REFUSED_ENV: frozenset[str] = frozenset(
+    {
+        "SMC_BUNDLE_DIR",
+        "SMC_FRONT_PORT",
+        "SMC_FRONT_BIND",
+        "SMC_REQUIRE_AUTH_ALL_ROUTES",
+    }
+    | set(CREDENTIAL_ENV)
+)
 
 #: The closed set a caller may not name. Everything outside it is the caller's:
 #: a bucket, a route prefix, a log level, whatever the deploy track passes.

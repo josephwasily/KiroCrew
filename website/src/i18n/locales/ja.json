@@ -16559,6 +16559,20 @@
         "remove_confirm": "{{provider}} の OAuth アプリを削除しますか？クライアント ID と保存済みのシークレットが削除され、再入力するまで {{provider}} は接続できません。",
         "remove_confirm_action": "OAuth アプリを削除",
         "cancel": "キャンセル"
+      },
+      "headlessCrewChat": {
+        "title": "このクルーとチャット",
+        "empty_state": "{{name}} は自身のダッシュボードを持ちません。ここでメッセージを送ると、このゲートウェイ経由で返信がストリーミングされます。",
+        "placeholder": "このクルーにメッセージを送る",
+        "connect_first": "先にこのクルーを接続してください",
+        "send": "送信",
+        "you": "あなた",
+        "empty_reply": "クルーは応答しましたが、本文がありませんでした。",
+        "unreachable": "クルーが応答しませんでした。接続を確認して再試行してください。",
+        "thread_label": "会話",
+        "secret_unavailable": "このクルーの認証情報を読み取れませんでした。デプロイが完了しているか確認して、もう一度お試しください。",
+        "resume_failed": "このクルーはスリープ中で、復帰できませんでした。もう一度試すか、再接続してください。",
+        "message_too_large": "メッセージが長すぎます。短くしてから送信してください。"
       }
     },
     "settingsPage": {
