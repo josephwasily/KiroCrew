@@ -2755,18 +2755,26 @@ def _lesson_jsonl_store(
     silo: str,
     scope: str = "global",
     workspace: str | None = None,
+    session_key: str = "",
 ) -> LessonStore:
     """Return only a V1 JSONL learning tier using the recorded store binding.
 
     Member V2 callers use their SQLite handle even when it contains no lessons.
     Workspace selection applies only to Global V1, preserving its existing
-    global/workspace fallback and list union.
+    global/workspace fallback and list union. A workspace-scoped write that
+    names no workspace resolves to the REQUESTING session's workspace
+    (*session_key*), never to another session's.
     """
     if silo:
         return ContextBuilder.get_lessons_for(memory_store=silo)
     if scope == "workspace":
-        return _get_lessons(state, workspace)
+        return _get_lessons(state, workspace, session_key=session_key)
     return state.lessons
+
+
+def _load_workspace_lessons(state: DashboardState, workspace: str) -> list[Lesson]:
+    """Every row in *workspace*'s JSONL lessons file."""
+    return _get_lessons(state, workspace).load_all()
 
 
 async def _prepare_member_lesson_store(store: str) -> web.Response | None:
@@ -2994,7 +3002,9 @@ async def api_lessons_create(request: web.Request) -> web.Response:
             applies=applies,
             ts=datetime.now(timezone.utc).isoformat(),
         )
-        store = _lesson_jsonl_store(state, _lesson_silo, scope, cleaned.get("workspace"))
+        store = _lesson_jsonl_store(
+            state, _lesson_silo, scope, cleaned.get("workspace"), session_key=sk
+        )
         # save_or_enrich, not save: a re-submit of a stored rule carrying a new
         # NOT-clause has to attach it rather than be skipped as a duplicate.
         # Off the loop because it reads the file and rewrites it whole -- the
@@ -3849,13 +3859,26 @@ async def api_lessons(request: web.Request) -> web.Response:
             (le, ("global", None)) for le in rows
         ]
         if not _lesson_silo:
-            # Merge global + workspace-scoped lessons
-            ws = workspace or _get_active_workspace(state)
-            if ws != "default":
+            # Merge global + workspace-scoped lessons. A named workspace wins; an
+            # agent session sees only its own slot's workspace; the operator's own
+            # dashboard surface (no key, or the shared ``dashboard:ui`` key, which
+            # names no slot) lists every configured workspace, so each workspace
+            # row stays visible and deletable from the Memory tab.
+            sk = request.headers.get("X-Session-Key", "")
+            if workspace:
+                union = [workspace]
+            elif sk in ("", "dashboard:ui"):
+                cfg = await asyncio.to_thread(KiroCrewConfig.load)
+                union = sorted(cfg.workspaces)
+            else:
+                union = [_get_active_workspace(state, sk)]
+            for ws in union:
+                if ws == "default":
+                    continue
                 # Every workspace row is listed, a same-text global row
                 # notwithstanding: the tier fields tell the two apart, and a row
                 # this list hides is a row the UI can never delete.
-                ws_lessons = await asyncio.to_thread(lambda: _get_lessons(state, ws).load_all())
+                ws_lessons = await asyncio.to_thread(_load_workspace_lessons, state, ws)
                 tiered.extend((le, ("workspace", ws)) for le in ws_lessons)
         total = len(tiered)
         # ``load_all()`` is file append order, so the newest rows are at the

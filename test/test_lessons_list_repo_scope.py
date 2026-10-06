@@ -486,7 +486,11 @@ async def test_jsonl_union_rows_name_their_tier_and_the_delete_honours_it(tmp_pa
         patch.object(cron, "resolve_lesson_memory_store", new=AsyncMock(return_value=(None, None))),
         patch.object(cron, "_prepare_member_lesson_store", new=AsyncMock(return_value=None)),
         patch.object(cron, "_get_memory", return_value=MagicMock(vector_store=None)),
-        patch.object(cron, "_get_active_workspace", return_value="ws-1"),
+        # The operator's dashboard key names no slot, so the union covers every
+        # configured workspace.
+        patch.object(
+            cron.KiroCrewConfig, "load", return_value=MagicMock(workspaces={"ws-1": MagicMock()})
+        ),
     ):
         resp = await cron.api_lessons(request)
     rows = json.loads(resp.text)["lessons"]
