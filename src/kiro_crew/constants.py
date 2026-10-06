@@ -103,13 +103,69 @@ def node_version_meets_floor(
     return tuple(version) >= tuple(floor)
 
 
+# Minimum glibc the OFFICIAL Node.js >= 18 Linux binaries (nodejs.org and the
+# prebuilt tarballs nvm/mise fetch) are linked against. Amazon Linux 2 ships
+# glibc 2.26, so those binaries are present on PATH but fail to LOAD with
+# "GLIBC_2.28 not found" -- which means the usual "install from nodejs.org / nvm
+# install" advice sends an AL2 user in a circle. ``ensure-node.sh`` already
+# resolves this by unpacking the nodejs "unofficial-builds" glibc-217 variant
+# (compiled against glibc 2.17); the message below points there instead on a
+# host whose glibc is below this floor.
+_OFFICIAL_NODE_GLIBC_FLOOR: tuple[int, int] = (2, 28)
+
+
+def _host_glibc_version() -> tuple[int, int] | None:
+    """This host's glibc (major, minor), or ``None`` when it cannot be read.
+
+    ``None`` on any non-glibc or unreadable host (macOS, Windows, musl, or an
+    unparseable version string) so the caller stays with the default remedy
+    rather than guessing. Uses ``platform.libc_ver`` -- the same reader
+    ``wheel_engine._no_wheel_message`` relies on -- and never raises.
+    """
+    import platform as _platform
+
+    if _platform.system() != "Linux":
+        return None
+    try:
+        name, ver = _platform.libc_ver()
+    except Exception:
+        return None
+    if name != "glibc" or not ver:
+        return None
+    m = re.match(r"^(\d+)\.(\d+)", ver)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)))
+
+
 def node_too_old_message(
     version: tuple[int, int, int], floor: tuple[int, int, int] = MIN_NODE_VERSION
 ) -> str:
-    """User-facing line naming the found version, the exact floor, and the fix."""
-    return (
+    """User-facing line naming the found version, the exact floor, and the fix.
+
+    On a host whose glibc is older than the official Node binaries' floor
+    (Amazon Linux 2 ships glibc 2.26), the usual nodejs.org / nvm advice fails
+    to LOAD -- the binaries exist but raise "GLIBC_2.28 not found" -- so the
+    message instead points at Kiro Crew's own ``ensure-node.sh`` / ``kirocrew
+    update``, which provisions the glibc-2.17 Node build that runs there.
+    """
+    base = (
         f"Node.js v{format_node_version(version)} is too old: Kiro Crew needs "
-        f"v{format_node_version(floor)} or newer. Update Node.js: install 24 LTS "
+        f"v{format_node_version(floor)} or newer."
+    )
+    glibc = _host_glibc_version()
+    if glibc is not None and glibc < _OFFICIAL_NODE_GLIBC_FLOOR:
+        # Official Node binaries will not load here; point at the build that does.
+        return (
+            f"{base} This host's glibc ({glibc[0]}.{glibc[1]}) is older than the "
+            f"official Node.js builds require (glibc {_OFFICIAL_NODE_GLIBC_FLOOR[0]}."
+            f"{_OFFICIAL_NODE_GLIBC_FLOOR[1]}+), so a nodejs.org / nvm install would "
+            'fail to run with "GLIBC_... not found". Run `kirocrew update` (or '
+            "`ensure-node.sh`), which installs a glibc-2.17 Node build that runs "
+            "here, or move to a newer base image (Amazon Linux 2023, Ubuntu 22.04+)."
+        )
+    return (
+        f"{base} Update Node.js: install 24 LTS "
         "from https://nodejs.org, or run `nvm install 24` / `mise use -g node@24`."
     )
 

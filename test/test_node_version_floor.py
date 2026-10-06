@@ -55,15 +55,73 @@ def test_parse_node_version(text, expected) -> None:
 
 
 @pytest.mark.parametrize("version", ["v22.0.0", "v22.9.0", "v22.11.0", "v22.11.9", "v20.19.0"])
-def test_below_the_floor_fails_with_the_exact_version(version: str) -> None:
+def test_below_the_floor_fails_with_the_exact_version(monkeypatch, version: str) -> None:
     parsed = parse_node_version(version)
     assert parsed is not None
     assert not node_version_meets_floor(parsed)
+    # Pin a modern glibc so the default (nodejs.org / nvm) remedy is asserted
+    # deterministically regardless of the glibc the test host actually ships.
+    monkeypatch.setattr(constants, "_host_glibc_version", lambda: (2, 35))
     assert node_too_old_message(parsed) == (
         f"Node.js {version} is too old: Kiro Crew needs {FLOOR_TEXT} or newer. "
         "Update Node.js: install 24 LTS from https://nodejs.org, or run "
         "`nvm install 24` / `mise use -g node@24`."
     )
+
+
+@pytest.mark.parametrize("glibc", [(2, 26), (2, 17), (2, 27), (1, 99)])
+def test_old_glibc_points_at_ensure_node_not_nodejs_org(monkeypatch, glibc) -> None:
+    # Amazon Linux 2 ships glibc 2.26: official Node >= 18 binaries fail to LOAD
+    # ("GLIBC_2.28 not found"), so the default nodejs.org / nvm advice is a dead
+    # end. Below the official floor the message must point at ensure-node.sh /
+    # kirocrew update (the glibc-2.17 build) instead.
+    monkeypatch.setattr(constants, "_host_glibc_version", lambda: glibc)
+    msg = node_too_old_message((17, 9, 1))
+    assert f"Kiro Crew needs {FLOOR_TEXT} or newer" in msg
+    assert "kirocrew update" in msg
+    assert "ensure-node.sh" in msg
+    assert f"glibc ({glibc[0]}.{glibc[1]})" in msg
+    # The dead-end advice must NOT be the remedy offered here.
+    assert "nvm install 24" not in msg
+    assert "install 24 LTS" not in msg
+
+
+@pytest.mark.parametrize("glibc", [(2, 28), (2, 35), (3, 0)])
+def test_modern_glibc_keeps_the_default_remedy(monkeypatch, glibc) -> None:
+    monkeypatch.setattr(constants, "_host_glibc_version", lambda: glibc)
+    msg = node_too_old_message((20, 19, 0))
+    assert "install 24 LTS" in msg
+    assert "nvm install 24" in msg
+    assert "ensure-node.sh" not in msg
+
+
+def test_non_glibc_host_keeps_the_default_remedy(monkeypatch) -> None:
+    # macOS / Windows / musl / unreadable: libc_ver gives no glibc, so the
+    # reader returns None and the default remedy stands.
+    monkeypatch.setattr(constants, "_host_glibc_version", lambda: None)
+    msg = node_too_old_message((20, 19, 0))
+    assert "install 24 LTS" in msg
+    assert "ensure-node.sh" not in msg
+
+
+def test_host_glibc_version_is_none_off_linux(monkeypatch) -> None:
+    import platform as _platform
+
+    monkeypatch.setattr(_platform, "system", lambda: "Darwin")
+    assert constants._host_glibc_version() is None
+
+
+def test_host_glibc_version_reads_libc_ver(monkeypatch) -> None:
+    import platform as _platform
+
+    monkeypatch.setattr(_platform, "system", lambda: "Linux")
+    monkeypatch.setattr(_platform, "libc_ver", lambda *a, **k: ("glibc", "2.26"))
+    assert constants._host_glibc_version() == (2, 26)
+    # A non-glibc libc (musl) or an empty/unparseable version yields None.
+    monkeypatch.setattr(_platform, "libc_ver", lambda *a, **k: ("libc", ""))
+    assert constants._host_glibc_version() is None
+    monkeypatch.setattr(_platform, "libc_ver", lambda *a, **k: ("glibc", "weird"))
+    assert constants._host_glibc_version() is None
 
 
 @pytest.mark.parametrize(
