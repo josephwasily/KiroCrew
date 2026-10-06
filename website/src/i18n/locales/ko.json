@@ -16883,7 +16883,7 @@
       "webview_published_ago_newer": "새 버전 {{ago}} 게시됨",
       "webview_empty": "이 크루메이트는 아직 보기를 게시하지 않았습니다.",
       "webview_setup": "헤더의 “크루메이트 편집”에서 설정하세요",
-      "webview_error": "게시한 보기를 표시하지 못했습니다.",
+      "webview_error": "게시된 보기를 표시하지 못했습니다.",
       "webview_refresh_error": "게시된 보기를 새로 고치지 못했습니다. 마지막으로 불러온 버전을 표시합니다.",
       "webview_refresh_error_aged": "게시된 보기를 새로 고치지 못했습니다. {{ago}} 버전을 표시합니다.",
       "webview_frame_title": "{{crew}}이(가) 게시한 보기",
