@@ -2407,6 +2407,97 @@ describe('DrivePage sections: backup, access, CLI drawer', () => {
     expect(await screen.findByTestId('backup-restored')).toHaveTextContent('/home/u/.kiro/restore/2026-08-24')
   })
 
+  it('distinguishes "no run recorded here" from "no archive kept" when archives are remembered', async () => {
+    // #13566 item 2: a row with no run record but a nonzero recorded count showed
+    // "Not backed up yet" beside "Archives this install has recorded: N", which
+    // reads as a contradiction -- the ledger keeps one run record per kind and
+    // holds only this install's, so a record can age out while archives stay on
+    // the drive. The meta line must then say which kind of "none" it means.
+    vi.mocked(awsControlApi.backup).mockResolvedValue({
+      ...emptyBackup,
+      runs: {},
+      rememberedArchives: { snapshot: 3 },
+    })
+
+    await renderDrive('backup')
+
+    const meta = await screen.findByTestId('backup-last-snapshot')
+    expect(meta.textContent ?? '').toContain('No run recorded here')
+    expect(meta.textContent ?? '').not.toContain('Not backed up yet')
+    // The count line still invites the reader to the list that says what is there.
+    expect(await screen.findByTestId('backup-remembered-snapshot')).toBeTruthy()
+    // A kind with nothing recorded keeps the plain line -- the clause is only for
+    // the contradiction.
+    expect((screen.getByTestId('backup-last-sessions').textContent ?? '')).toContain('Not backed up yet')
+  })
+
+  it('scrolls the stored-archive disclosure into view when the recorded-count line is clicked', async () => {
+    // #13566 item 3: clicking the count line opened the disclosure but left it
+    // off-screen on a long pane, so the reader asked to see the archives and the
+    // view did not move. jsdom has no scrollIntoView; install one for the
+    // assertion and restore it so nothing leaks into the next test.
+    const scrolled = vi.fn()
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = scrolled
+    onTestFinished(() => { Element.prototype.scrollIntoView = original })
+    // requestAnimationFrame drives the deferred scroll; run it synchronously.
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(0); return 0 })
+    onTestFinished(() => raf.mockRestore())
+
+    vi.mocked(awsControlApi.backup).mockResolvedValue({
+      ...emptyBackup,
+      runs: {},
+      rememberedArchives: { snapshot: 2 },
+    })
+
+    await renderDrive('backup')
+
+    fireEvent.click(await screen.findByTestId('backup-remembered-snapshot'))
+    // The disclosure opened AND it was scrolled to.
+    expect(await screen.findByTestId('backup-archive')).toBeTruthy()
+    expect(scrolled).toHaveBeenCalled()
+  })
+
+  it('re-scrolls to the archive list once the remote rows arrive after the click', async () => {
+    // #13566 item 3, the reviewer's path: on the FIRST open `setShowRemote(true)`
+    // changes the query key and `placeholderData` keeps the prior response, which
+    // has no `remote`, so the reveal scroll runs against skeleton height and the
+    // rows that load afterwards grow below the viewport. The fix re-scrolls once
+    // `data.remote` resolves while a reveal is pending. Simulated here by a first
+    // response with no remote rows and a second (the `remote: true` refetch) that
+    // carries them: scrollIntoView must fire again after the rows land.
+    const scrolled = vi.fn()
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = scrolled
+    onTestFinished(() => { Element.prototype.scrollIntoView = original })
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(0); return 0 })
+    onTestFinished(() => raf.mockRestore())
+
+    vi.mocked(awsControlApi.backup)
+      // First load: remembered count is known, but the remote half is not fetched
+      // yet (it is opt-in behind the disclosure), so `remote` is null.
+      .mockResolvedValueOnce({
+        ...emptyBackup,
+        runs: {},
+        remote: null,
+        rememberedArchives: { snapshot: 2 },
+      })
+      // After the click flips `showRemote`, the refetch returns the rows.
+      .mockResolvedValue({
+        ...emptyBackup,
+        runs: {},
+        remote: { ...emptyRemote, snapshot: [{ key: 'snap-1', size: 1024, modified: '2026-08-20T00:00:00Z', install: INSTALL_ID, origin: 'self' }] },
+        rememberedArchives: { snapshot: 2 },
+      })
+
+    await renderDrive('backup')
+
+    fireEvent.click(await screen.findByTestId('backup-remembered-snapshot'))
+    // The rows arrive on the refetch; the effect must re-scroll once they do.
+    await screen.findByTestId('backup-archive')
+    await waitFor(() => expect(scrolled.mock.calls.length).toBeGreaterThan(1))
+  })
+
   it('shows the backup remote-error note when the archive could not be read', async () => {
     stubDrivePresent()
     vi.mocked(awsControlApi.backup).mockResolvedValue({

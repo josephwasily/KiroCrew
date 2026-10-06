@@ -3896,10 +3896,20 @@ function BackupRow({
       </span>
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium text-text">{i18nT(BACKUP_KIND_LABEL_KEY[kind])}</div>
-        <div className="text-[12px] text-muted">
+        <div className="text-[12px] text-muted" data-testid={`backup-last-${kind}`}>
           {run
             ? i18nT('apps.awsControl.console.backup_last_run', { when: fmtRelative(run.at), size: fmtBytes(run.bytes) })
-            : i18nT('apps.awsControl.console.backup_never')}
+            : // "Not backed up yet" alone contradicts a nonzero recorded count on
+              // the same row: the ledger keeps one run record per kind and holds
+              // only this install's, so a record aged out of it -- or made by a
+              // reinstall under the same name -- leaves archives on the drive with
+              // no run line. When the count line below will say archives exist,
+              // this one says which kind of "none" it means: no run recorded here,
+              // not no archive kept. With nothing recorded either, the plain line
+              // still reads correctly.
+              remembered != null && remembered > 0
+              ? i18nT('apps.awsControl.console.backup_never_recorded')
+              : i18nT('apps.awsControl.console.backup_never')}
         </div>
         {/* The line above reports ONE run, because the ledger keeps one record per
             kind: a second nightly overwrites the first while both archives stay in
@@ -4015,6 +4025,32 @@ export function BackupSection({ account }: { account: string }) {
   const qc = useQueryClient()
   const appKey = useAppQueryKey()
   const [showRemote, setShowRemote] = useState(false)
+  // The stored-archive disclosure the count line opens. Clicking that line far
+  // up the pane used only to flip `showRemote`, which left the list it reveals
+  // off-screen on a long pane -- the reader asked to see the archives and the
+  // view did not move. This ref is the scroll target so the open and the scroll
+  // happen together.
+  const remoteRef = useRef<HTMLDivElement>(null)
+  // A reveal is "pending" from the click until the paid remote rows actually
+  // land. On the FIRST open, `setShowRemote(true)` changes the query key and
+  // `placeholderData` keeps the prior response, which carries no `data.remote`,
+  // so the panel renders at skeleton height; a scroll in that frame pins only
+  // the toggle header and the rows that arrive later grow BELOW the viewport.
+  // This flag lets the effect below re-scroll once those rows exist.
+  const pendingRevealRef = useRef(false)
+  // Open the disclosure AND bring it into view. The scroll is deferred to the
+  // next frame because `setShowRemote(true)` has to render the panel before
+  // there is anything to scroll to; a `scrollIntoView` in the same tick would
+  // run against the collapsed height. `block: 'start'` pins the wrapper's TOP
+  // (not its current midpoint), so rows that load afterwards grow down into
+  // view rather than past the bottom edge. Already-open is handled too: a
+  // second click on the count line re-scrolls to the list rather than doing
+  // nothing. The pending flag is cleared by the effect once the rows render.
+  const revealRemote = useCallback(() => {
+    setShowRemote(true)
+    pendingRevealRef.current = true
+    requestAnimationFrame(() => remoteRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }))
+  }, [])
   // Opt-in: each other install listed costs extra paid AWS calls, so the drive
   // is asked about co-tenants only when the reader turns this on. Part of the
   // query key the same way `showRemote` is, so flipping it is a deliberate
@@ -4101,6 +4137,18 @@ export function BackupSection({ account }: { account: string }) {
   // empty state, the strip-visibility invariant, and the list itself share a
   // single definition of "on screen" and cannot drift when the cap changes.
   const renderedRows = BACKUP_KINDS.flatMap((kind) => (data?.remote?.[kind] ?? []).slice(0, 5))
+  // The first reveal scrolls against skeleton height (see `revealRemote`): the
+  // rows this reader clicked for only exist once `data.remote` resolves. When
+  // they do, while a reveal is still pending, scroll once more so the grown
+  // list lands in view, then clear the flag so later refetches do not yank the
+  // pane around. Keyed on `data.remote` existing, which is exactly the fact the
+  // placeholder response lacked on the first open.
+  useEffect(() => {
+    if (!pendingRevealRef.current) return
+    if (!data?.remote) return
+    pendingRevealRef.current = false
+    requestAnimationFrame(() => remoteRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }))
+  }, [data?.remote])
   // The refusal sentence below and the confirm strip answer the same question,
   // so exactly one of them may be on screen -- and the strip only exists while
   // the disclosure is open AND its row is among the rendered rows. Visibility
@@ -4170,8 +4218,10 @@ export function BackupSection({ account }: { account: string }) {
               // poll gap and looking like the click did nothing.
               onStarted={invalidate}
               // The same act as clicking the disclosure below: the reader asks for
-              // the listing, which is why the paid remote half stays opt-in.
-              onShowArchives={() => setShowRemote(true)}
+              // the listing, which is why the paid remote half stays opt-in. It
+              // also scrolls the list into view, since the count line can sit a
+              // long way above the disclosure it opens.
+              onShowArchives={revealRemote}
             />
           ))}
           <div className="flex items-center justify-between gap-3 px-3 py-2.5" data-testid="backup-nightly">
@@ -4361,7 +4411,7 @@ export function BackupSection({ account }: { account: string }) {
         * remote fetching wait for the fetch it enables, and the archive and
         * Restore became unreachable. The rows below are already null-safe. */}
       {data && (
-        <div className="mt-2">
+        <div className="mt-2" ref={remoteRef}>
           <button
             onClick={() => setShowRemote((v) => !v)}
             className="inline-flex items-center gap-1 text-[12px] text-muted hover:text-text cursor-pointer bg-transparent border-none p-0"
