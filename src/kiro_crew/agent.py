@@ -433,9 +433,21 @@ def _declined_foreign_spec_write(path: Path) -> bool:
         # Inside a rebuild the guard already admitted. Asking again per write
         # would answer a DIFFERENT question than the rebuild's, because the
         # rebuild's own first spec changes what the temp-checkout arm sees --
-        # see ``_rebuild_spec_install_admitted``.
+        # see ``_rebuild_spec_install_admitted``. The rebuild has already emitted
+        # its own "allowed" agent_home_write event once, so emitting here too
+        # would double-count the same admitted transaction.
         return False
     if _decline_shared_agent_home(audit=False) is None:
+        # The write is admitted. Record the "allowed" half for the shared agents
+        # directory, so a derived-spec write admitted OUTSIDE a rebuild (e.g. a
+        # worker mirror re-derived on spawn after an app deregistration left it
+        # stale) is not a silent gap in the SEL trail -- the rebuild audits its
+        # own grant, but these per-dispatch writers reach this primitive on their
+        # own. A PRIVATE redirected target is exempt, not a decision about the
+        # shared resource, so it emits nothing (mirrors _decline_shared_agent_home,
+        # which does not audit its private-target returns). Best-effort: a lost
+        # audit record must never turn an allowed write into a failure.
+        _audit_allowed_shared_write(path)
         return False
     _warn_declined_home_once(
         "derived-spec",
@@ -460,6 +472,46 @@ def _declined_foreign_spec_write(path: Path) -> bool:
     except Exception:  # noqa: BLE001 — a lost record must not turn a refusal into a write
         logger.debug("SEL audit unavailable for a refused shared write", exc_info=True)
     return True
+
+
+def _audit_allowed_shared_write(path: Path) -> None:
+    """Record the "allowed" half of an admitted derived-spec write, best-effort.
+
+    Called only from :func:`_declined_foreign_spec_write` when the write is
+    admitted (``_decline_shared_agent_home`` returned ``None``) and NOT inside an
+    already-admitted rebuild. It records the grant for the SHARED agents
+    directory so a per-dispatch writer admitted outside a rebuild -- the worker
+    mirror re-derived on spawn after an app deregistration left it stale is the
+    motivating case -- leaves an ``agent_home_write`` / ``allowed`` event under
+    its own source, matching the ``denied`` half this guard already records and
+    the ``allowed`` the rebuild records for its own transaction.
+
+    A PRIVATE target is not a decision about the shared resource, so it emits
+    nothing: ``_decline_shared_agent_home`` also returns ``None`` for a redirected
+    target the ambient environment would never produce (a test ``tmp_path``, a
+    relocated agents dir), and it does not audit those returns either. The target
+    is the shared one only when the configured agents dir resolves to the ambient
+    one; otherwise this is such a private redirect and we stay silent.
+
+    Best-effort: any failure (an unresolvable path, an unavailable audit sink) is
+    swallowed, because an allowed write must never be turned into a failure by a
+    lost record -- the same contract the ``denied`` branch keeps.
+    """
+    try:
+        if kiro_agents_dir_path().resolve() != ambient_agents_dir().resolve():
+            # A private redirect, not the shared directory: no shared-resource
+            # decision was made here, so (like _decline_shared_agent_home's own
+            # private-target returns) emit nothing.
+            return
+        sel().log_api_access(
+            caller="system",
+            operation="agent_home_write",
+            outcome="allowed",
+            source="derived-spec",
+            resources=str(path.parent),
+        )
+    except Exception:  # noqa: BLE001 — a lost record must not turn an allowed write into a failure
+        logger.debug("SEL audit unavailable for an allowed shared write", exc_info=True)
 
 
 def write_owner_derived_spec(path: Path, data: dict) -> None:
