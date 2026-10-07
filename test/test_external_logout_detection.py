@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -1576,6 +1577,32 @@ class TestLatchNarrowingPolicy:
         assert sessions.calls == 2
 
     @pytest.mark.asyncio
+    async def test_an_incomplete_sweep_warns_and_names_what_it_waits_on(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """INFO sits below the default level, so the holdout was invisible."""
+
+        from kiro_crew.dashboard import chat_runner
+
+        db = kp.kiro_identity_store_path("linux", tmp_path, {})
+        _write_store(db)
+        service = kp.KiroPrerequisiteService(home=tmp_path, environ={}, platform_name="linux")
+        service._stamp_probe(await service.current_identity_fingerprint())
+
+        _write_store(db, start_url="https://personal.awsapps.com/start")
+        sessions = self._Sessions(complete=False)
+        sessions.identity_sweep_waiting_on = ("channel:c1:m1 (channel member)",)  # type: ignore[attr-defined]
+        state = self._State(service, sessions)
+
+        with caplog.at_level(logging.INFO, logger="kiro_crew.dashboard.chat_runner"):
+            await chat_runner._retire_sessions_on_identity_change(state)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, caplog.text
+        assert "incomplete" in warnings[0].getMessage()
+        assert "channel:c1:m1 (channel member)" in warnings[0].getMessage()
+
+    @pytest.mark.asyncio
     async def test_a_complete_sweep_reconciles_once(self, tmp_path: Path) -> None:
         from kiro_crew.dashboard import chat_runner
 
@@ -2138,6 +2165,57 @@ class TestRetirementCoverage:
         assert bg.killed == 0
         assert smap._bg_runtime is bg
         assert complete is True
+
+    # -- Channel members ----------------------------------------------------
+    #
+    # A channel member holds its lease for the channel's whole life, so the
+    # semaphore test reads it as busy even while it only listens.
+
+    def _channel_member(self, smap, key: str, stamp: str):
+        provider = _FakeProvider("")
+        if stamp:
+            provider.spawn_identity = stamp  # type: ignore[attr-defined]
+        smap._sessions[key] = self._session(provider, busy=True)
+        assert smap.mark_lifecycle_lease(key), "precondition: the lease was not declared"
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_a_live_stamped_channel_member_does_not_block_completion(self) -> None:
+        smap = self._manager()
+        member = self._channel_member(smap, "channel:c1:m1", self.LIVE)
+
+        retired, complete = await smap.retire_kiro_identity_sessions(fingerprint=self.LIVE)
+
+        assert retired == []
+        assert complete is True
+        assert member.shutdown_calls == 0
+        assert not smap._sessions["channel:c1:m1"].retire_on_identity_change
+        assert smap.pending_identity_sweep_fingerprint == ""
+        assert smap.identity_sweep_waiting_on == ()
+
+    @pytest.mark.asyncio
+    async def test_an_old_account_channel_member_is_named_as_the_holdout(self) -> None:
+        smap = self._manager()
+        member = self._channel_member(smap, "channel:c1:m1", "cli-old")
+        busy = _FakeProvider("")
+        smap._sessions["chat-busy"] = self._session(busy, busy=True)
+
+        retired, complete = await smap.retire_kiro_identity_sessions(fingerprint=self.LIVE)
+
+        assert retired == []
+        assert complete is False
+        assert member.shutdown_calls == 0
+        assert smap.identity_sweep_waiting_on == (
+            "channel:c1:m1 (channel member)",
+            "chat-busy (busy)",
+        )
+
+        # Once the holdouts are gone the next sweep completes and clears the list.
+        del smap._sessions["channel:c1:m1"]
+        del smap._sessions["chat-busy"]
+        _, complete = await smap.retire_kiro_identity_sessions(fingerprint=self.LIVE)
+        assert complete is True
+        assert smap.identity_sweep_waiting_on == ()
 
     @pytest.mark.asyncio
     async def test_a_provider_mid_start_makes_the_sweep_incomplete(self) -> None:

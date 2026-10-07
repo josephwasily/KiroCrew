@@ -3083,12 +3083,23 @@ async def _retire_sessions_on_identity_change(state: Any) -> None:
         # fail-closed gates carry their own freshness bound.
         if not live:
             service.mark_signed_out()
-        if retired or not complete:
-            logger.info(
-                "Kiro identity changed; retired %d session(s)%s: %s",
+        if not complete:
+            # WARNING, not INFO: an incomplete sweep re-runs on every turn and
+            # recycles idle sessions each time, so the holdout it names is what
+            # an operator needs to find (an open channel member, a busy chat).
+            waiting_on = getattr(sessions, "identity_sweep_waiting_on", ())
+            logger.warning(
+                "Kiro identity sweep incomplete, will retry next turn; "
+                "retired %d session(s): %s; waiting on: %s",
                 len(retired),
-                "" if complete else " (incomplete, will retry next turn)",
                 ", ".join(retired) or "none",
+                ", ".join(waiting_on) or "unknown",
+            )
+        elif retired:
+            logger.info(
+                "Kiro identity changed; retired %d session(s): %s",
+                len(retired),
+                ", ".join(retired),
             )
     except Exception:
         logger.debug("Could not apply a Kiro identity change", exc_info=True)

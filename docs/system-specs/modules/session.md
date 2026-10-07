@@ -616,6 +616,12 @@ respawn holding that lock installs a live-stamped replacement under the same
 key before letting go, so a pop by key alone would kill the runtime the spare
 exists to keep. A release whose pin no longer matches pops nothing, returns
 `False`, and leaves the replacement to the post-condition.
+A channel member holds its lease for the channel's life (`lifecycle_lease`), so
+the sweep always reads it as busy. One stamped with the live account takes the
+same spare; one on another account is flagged and keeps the sweep incomplete.
+An incomplete sweep records what it is waiting on (`identity_sweep_waiting_on`:
+session keys tagged `busy` or `channel member`, or the runtime that stayed up),
+and the turn gate logs it at WARNING so an operator can find the holdout.
 
 **Per-turn stamp gate** (`flag_identity_stamp_mismatches`, before the
 unchanged early-return in the turn gate): a session whose stamp provably

@@ -735,6 +735,11 @@ class SessionLifecycleState:
     # while the sweep runs and cleared only by the sweep that completes it, so an
     # outstanding change stays its own trigger for the next turn.
     identity_sweep_fingerprint: str = ""
+    # What the LAST sweep could not finish, one short label each (a session key,
+    # tagged when it is a busy or channel-member holder, or the runtime that
+    # stayed up). Empty after a complete sweep. Read by the caller's warning so
+    # an incomplete sweep names what it is waiting on.
+    identity_sweep_waiting_on: tuple[str, ...] = ()
     recycling: dict[str, _SessionEntry] = field(default_factory=dict)
     # Folded key -> the session ``reset`` popped under it, for exactly the life of
     # that teardown. ``reset`` pops the session out of the live map under the
@@ -1979,6 +1984,7 @@ class SessionLifecycleService:
         doomed: list[tuple[str, Any]] = []
         teardown_children_by_key: dict[str, tuple[str, ...]] = {}
         skipped = False
+        waiting_on: list[str] = []
         # One sweep at a time: the drain below is not re-entrant (a second
         # concurrent drain raises), so a peer sweep waits here for this one.
         async with self._identity_sweep_lock:
@@ -2040,6 +2046,12 @@ class SessionLifecycleService:
                             sess.retire_on_identity_change = True
                             invalidated_keys.append(key)
                             skipped = True
+                            holder = (
+                                "channel member"
+                                if getattr(sess, "lifecycle_lease", False)
+                                else "busy"
+                            )
+                            waiting_on.append(f"{key} ({holder})")
                             continue
                         del owner._sessions[key]
                         owner._advance_session_generation(key)
@@ -2104,21 +2116,26 @@ class SessionLifecycleService:
                     exc_info=True,
                 )
                 skipped = True
+                waiting_on.append(f"{key} (shutdown failed)")
 
         # Warm-pool policy remains owned by the pool service; route through the
         # facade to retain direct manager monkeypatches and its fill-lock policy.
         if not await owner._retire_kiro_warm_pool():
             skipped = True
+            waiting_on.append("warm pool")
         # Same spare for the companion runtimes: one that provably spawned
         # under the live account is neither reaped nor a reason to re-sweep.
         if not await owner._retire_kiro_subagent_runtimes(live=fingerprint):
             skipped = True
+            waiting_on.append("sub-agent runtimes")
         if not await owner._retire_kiro_bg_runtime(live=fingerprint):
             skipped = True
+            waiting_on.append("background runtime")
         if owner._starting_pids:
             # With every cold-start permit held above, residue here means a
             # producer bypassed the barrier; fail toward another sweep.
             skipped = True
+            waiting_on.append("cold starts in flight")
         complete = not skipped
         if complete:
             # Only the sweep that OWNS the pending fingerprint may retire it. The
@@ -2132,6 +2149,8 @@ class SessionLifecycleService:
                 self.state.identity_sweep_fingerprint = ""
             else:
                 complete = False
+                waiting_on.append("a newer identity change")
+        self.state.identity_sweep_waiting_on = tuple(waiting_on)
         return retired, complete
 
     async def _retire_kiro_subagent_runtimes(

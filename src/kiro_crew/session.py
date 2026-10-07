@@ -1572,6 +1572,16 @@ class SessionManager:
         return self._lifecycle_state_boundary().identity_sweep_fingerprint
 
     @property
+    def identity_sweep_waiting_on(self) -> tuple[str, ...]:
+        """What the last identity sweep could not finish, or ``()`` after a complete one.
+
+        One short label per holdout: a session key tagged ``busy`` or ``channel
+        member``, or the runtime that stayed up. Read-only, like the pending
+        fingerprint: the lifecycle service owns every write.
+        """
+        return self._lifecycle_state_boundary().identity_sweep_waiting_on
+
+    @property
     def _recycling(self) -> dict[str, "_Session"]:
         return self._lifecycle_state_boundary().recycling  # type: ignore[return-value]
 
