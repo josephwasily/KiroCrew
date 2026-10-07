@@ -7878,6 +7878,7 @@ async def _persist_abnormal_turn_usage(
     elapsed_ms: int,
     stop_reason: str,
     since: object = _NO_PRIOR_STATS,
+    usage: TurnUsage | None = None,
 ) -> bool:
     """Write the usage row for a turn ending without ``EVENT_COMPLETE``.
 
@@ -7916,9 +7917,14 @@ async def _persist_abnormal_turn_usage(
     row has been written, so the caller marks the turn recorded and this stays
     once-per-turn across the seam's callers. Never raises -- these are
     best-effort analytics, as the complete path's own persist is.
+
+    ``usage`` is the turn's billing when the caller already read it (the Stop
+    footer shares the one read, because ``provider_last_turn_usage`` consumes
+    the accumulated total); ``None`` reads it here.
     """
     try:
-        usage = provider_last_turn_usage(client, since=since)
+        if usage is None:
+            usage = provider_last_turn_usage(client, since=since)
         if not usage_has_billing(usage):
             return False
         _provider_name = capabilities_of(client).provider_seam
@@ -8617,15 +8623,54 @@ async def _run_chat(
             return
         if slot._acp_client is None:
             return
+        _elapsed_ms = int((time.monotonic() - _turn_t0) * 1000)
+        # Read the turn's billing ONCE: ``provider_last_turn_usage`` consumes the
+        # accumulated multi-attempt total, so a second read for the footer would
+        # see only the last attempt. The row and the footer share this value.
+        _usage = provider_last_turn_usage(client, since=_turn_stats0)
+        if reason == STOP_REASON_CANCELLED:
+            # A Stop press is the one abnormal end the user caused on purpose,
+            # and the partial reply it leaves is a reply they read: give it the
+            # same footer a completed turn gets (#11523), so what the stopped
+            # turn cost is visible where the turn ended.
+            _attach_stopped_turn_stats(_usage, _elapsed_ms)
         if await _persist_abnormal_turn_usage(
             slot,
             client,
             session_key,
-            elapsed_ms=int((time.monotonic() - _turn_t0) * 1000),
+            elapsed_ms=_elapsed_ms,
             stop_reason=reason or _stop_reason or STOP_REASON_CANCELLED,
             since=_turn_stats0,
+            usage=_usage,
         ):
             _turn_usage_persisted = True
+
+    def _attach_stopped_turn_stats(usage: TurnUsage, elapsed_ms: int) -> None:
+        """Put ``meta.turn_stats`` on a stopped turn's last reply row.
+
+        Same writer and the same shape as a completed turn
+        (``_attach_turn_stats`` -> ``turn_stats_meta``), so the footer renders
+        exactly what it renders for a finished turn: elapsed always, credits or
+        cost only when the provider reported a non-zero figure. Scoped to this
+        turn's rows by ``_turn_msg_boundary``; a turn stopped before it wrote any
+        reply row gets no footer, because there is no row to carry one.
+
+        The row is mutated in place; it reaches disk because the turn's
+        ``finally`` runs ``_flush_file_changes``, which marks the slot dirty on
+        every exit. Best-effort: a failure never disturbs the cancel teardown or
+        the usage row.
+        """
+        try:
+            _attach_turn_stats(
+                slot,
+                elapsed_ms,
+                float(usage.credits or 0.0),
+                float(usage.cost_usd or 0.0),
+                turn_boundary=_turn_msg_boundary,
+                model=read_turn_model(client) or "",
+            )
+        except Exception:
+            logger.debug("Failed to attach stopped-turn stats for slot %s", slot.key, exc_info=True)
 
     def _flush_text_stream() -> None:
         """Emit the redactor's withheld tail as a final chat_chunk before a

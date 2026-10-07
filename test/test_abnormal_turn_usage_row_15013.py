@@ -452,3 +452,124 @@ class TestCancelDuringCompletePersist:
         )
         # The prior object was never consumed/mutated by the guarded read.
         assert client.last_prompt_stats is prior
+
+
+class TestStoppedTurnFooter:
+    """#11523: a Stop press gives the partial reply the completed-turn footer.
+
+    A completed turn's last reply row carries ``meta.turn_stats`` (elapsed,
+    credits/cost, model) and the dashboard renders it as the usage line under
+    the reply. A Stop ends the turn through the CancelledError arm instead, so
+    before #11523 the partial reply had no footer and the stopped turn's spend
+    was only in the usage row. These drive the real ``_run_chat`` with the REAL
+    ``provider_last_turn_usage`` and assert the footer on the partial row, and
+    that the footer and the usage row come from the same single billing read.
+    """
+
+    @staticmethod
+    def _stop_mid_stream(slot, client, credits, *, accumulated=None):
+        from kiro_crew import llm_helpers
+        from kiro_crew.providers.base import EVENT_TEXT_CHUNK, LLMEvent
+
+        async def _stream(msg):
+            client.last_prompt_stats = stats = _RealStats(credits=credits)
+            if accumulated is not None:
+                # A multi-attempt turn: the retry loop published the turn's
+                # TOTAL beside the last attempt's live stats. The read consumes
+                # it, so only a single shared read gives the footer and the row
+                # the same total.
+                setattr(client, llm_helpers._TURN_BILLED_ATTR, (stats, accumulated))
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial answer")
+            # A real turn takes time; a sub-millisecond one measures 0 ms, which
+            # turn_stats_meta reads as nothing to show.
+            await asyncio.sleep(0.02)
+            # The dashboard Stop handler marks the slot, then the turn's task
+            # is cancelled -- the shape _stop_pressed() reads.
+            slot._stopping = True
+            raise asyncio.CancelledError()
+
+        client.stream = _stream
+        client.stream_command = _stream
+
+    @staticmethod
+    def _partial_row(slot):
+        rows = [m for m in slot.messages if m.get("role") == "assistant"]
+        assert rows, "the stopped turn persisted no partial reply row"
+        return rows[-1]
+
+    @pytest.mark.asyncio
+    async def test_a_stop_press_puts_the_turn_footer_on_the_partial_reply(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(usage_mod, "_TOKEN_USAGE_DIR", tmp_path)
+        monkeypatch.setattr(chat_runner, "read_turn_model", lambda c: "served-model")
+        state, slot, client = _drive_state_and_slot(tmp_path, name="stop-footer-slot")
+        client.last_prompt_stats = _RealStats(credits=0.0)
+        # Last attempt billed 1.0; the turn's accumulated total is 3.25.
+        self._stop_mid_stream(slot, client, credits=1.0, accumulated=TurnUsage(credits=3.25))
+        await _run_chat(state, slot, "test message")
+
+        row = self._partial_row(slot)
+        assert row["content"] == "partial answer"
+        stats = (row.get("meta") or {}).get("turn_stats")
+        assert stats is not None, "a stopped turn's partial reply carries no footer"
+        assert stats["credits"] == pytest.approx(3.25)
+        assert stats["elapsed_ms"] > 0
+        assert stats["model"] == "served-model"
+        # The in-place meta write must reach disk: the cancel path has no
+        # explicit save, so the slot must end the turn dirty (the finally's
+        # file-change flush marks it on every exit).
+        assert slot._dirty is True
+        # One billing read feeds both: the usage row carries the same total.
+        rows = _rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["credits"] == pytest.approx(3.25)
+        assert rows[0]["stop_reason"] == chat_runner.STOP_REASON_CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_a_stop_before_any_billing_still_shows_elapsed_only(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # Parity with a completed turn: an unreported figure is omitted, never
+        # rendered as zero, and no usage row is written for an unbilled turn.
+        monkeypatch.setattr(usage_mod, "_TOKEN_USAGE_DIR", tmp_path)
+        monkeypatch.setattr(chat_runner, "read_turn_model", lambda c: "")
+        state, slot, client = _drive_state_and_slot(tmp_path, name="stop-unbilled-slot")
+        client.last_prompt_stats = _RealStats(credits=0.0)
+        self._stop_mid_stream(slot, client, credits=0.0)
+
+        await _run_chat(state, slot, "test message")
+
+        stats = (self._partial_row(slot).get("meta") or {}).get("turn_stats")
+        assert stats is not None
+        assert set(stats) == {"elapsed_ms"}
+        assert _rows(tmp_path) == []
+
+    @pytest.mark.asyncio
+    async def test_an_involuntary_cancel_gets_no_footer(self, tmp_path, monkeypatch) -> None:
+        # Scope pin: only the Stop press, the end the user caused, gets the
+        # footer. A tab close / idle sweep / shutdown cancel ("error: cancelled")
+        # still writes the usage row but leaves the partial reply bare.
+        from kiro_crew.providers.base import EVENT_TEXT_CHUNK, LLMEvent
+
+        monkeypatch.setattr(usage_mod, "_TOKEN_USAGE_DIR", tmp_path)
+        monkeypatch.setattr(chat_runner, "read_turn_model", lambda c: "served-model")
+        state, slot, client = _drive_state_and_slot(tmp_path, name="sweep-cancel-slot")
+        client.last_prompt_stats = _RealStats(credits=0.0)
+
+        async def _stream(msg):
+            client.last_prompt_stats = _RealStats(credits=2.0)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial answer")
+            # Same duration as the Stop case, so only the Stop press differs.
+            await asyncio.sleep(0.02)
+            raise asyncio.CancelledError()
+
+        client.stream = _stream
+        client.stream_command = _stream
+
+        await _run_chat(state, slot, "test message")
+
+        assert "turn_stats" not in (self._partial_row(slot).get("meta") or {})
+        rows = _rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["credits"] == pytest.approx(2.0)
