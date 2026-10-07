@@ -515,10 +515,14 @@ class FieldSpec:
     allowed: frozenset[str] | None = None  # enum allow-list
     pattern: re.Pattern[str] | None = None  # regex pattern
     default: Any = None
-    item_type: type | None = None  # type: ignore[valid-type]  # for list fields: expected type of each element
+    item_type: type | tuple[type, ...] | None = None  # type: ignore[valid-type]  # for list fields: expected type(s) of each element
     item_max_len: int = 0  # for list fields: max length of each string element
     item_pattern: re.Pattern[str] | None = None  # for list fields: regex for each string element
     max_items: int = 0  # for list fields: max number of items (0 = no limit)
+    # For list fields whose items may be objects: the ToolSchema each dict item
+    # is validated against (unknown keys refused, like a top-level call). Only
+    # consulted when ``item_type`` admits ``dict``.
+    item_schema: Any = None
     # Opt-in, and DELIBERATELY narrow: when a string field is over ``max_len``,
     # truncate it to the cap instead of rejecting the whole call. For a field
     # whose only job is to EXPLAIN a request — ``autonudge_stop`` /
@@ -633,10 +637,21 @@ def validate_field(value: Any, spec: FieldSpec) -> Any:
         if spec.item_type:
             for i, item in enumerate(value):
                 if not isinstance(item, spec.item_type):
+                    expected = (
+                        spec.item_type.__name__
+                        if isinstance(spec.item_type, type)
+                        else " or ".join(t.__name__ for t in spec.item_type)
+                    )
                     raise ValidationError(
                         spec.name,
-                        f"item[{i}]: expected {spec.item_type.__name__}, got {type(item).__name__}",
+                        f"item[{i}]: expected {expected}, got {type(item).__name__}",
                     )
+                if isinstance(item, dict) and spec.item_schema is not None:
+                    try:
+                        value[i] = validate_tool_args(item, spec.item_schema)
+                    except ValidationError as exc:
+                        raise ValidationError(f"{spec.name}[{i}].{exc.field}", exc.message) from exc
+                    continue
                 if isinstance(item, str):
                     item = sanitize_string(item)
                     value[i] = item
@@ -1287,11 +1302,33 @@ def validate_jsonrpc_request(req: dict[str, Any]) -> tuple[str, Any, dict[str, A
 
 # ── Tool Schemas (MCP Core) ──
 
+#: One ``spawn_run`` ``tasks[]`` entry in object form (issue #2140). A string
+#: entry is the plain prompt; an object entry carries the prompt plus the
+#: per-task overrides that win over the call's batch-wide value. Kept to the
+#: fields a caller varies across one wave in practice (template, model,
+#: effort); the rest stay batch-wide and can join this object later without
+#: changing the shape again.
+SPAWN_RUN_TASK_ITEM_SCHEMA = ToolSchema(
+    tool_name="spawn_run.tasks[]",
+    fields=[
+        FieldSpec("task", str, required=True, max_len=MAX_MEDIUM_STRING),
+        FieldSpec("agent", str, max_len=MAX_SHORT_STRING, pattern=REGISTERED_AGENT_NAME_RE),
+        FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
+        FieldSpec("reasoning_effort", str, allowed=EFFORT_VALUES),
+    ],
+)
+
 SPAWN_RUN_SCHEMA = ToolSchema(
     tool_name="spawn_run",
     fields=[
         FieldSpec("task", str, max_len=MAX_MEDIUM_STRING),
-        FieldSpec("tasks", list, item_type=str, item_max_len=MAX_MEDIUM_STRING),
+        FieldSpec(
+            "tasks",
+            list,
+            item_type=(str, dict),
+            item_max_len=MAX_MEDIUM_STRING,
+            item_schema=SPAWN_RUN_TASK_ITEM_SCHEMA,
+        ),
         FieldSpec("agent", str, max_len=MAX_SHORT_STRING, pattern=REGISTERED_AGENT_NAME_RE),
         FieldSpec(
             "agents",
