@@ -296,26 +296,63 @@ def _mask_html_comments(line: str, inside: bool) -> tuple[str, bool]:
 
 #: The four bare CommonMark §4.6 condition-1 tags whose HTML blocks hold
 #: content opaquely across blank lines. Each ends at its matching ``</tag>``.
+#: This is the MARKDOWN set: it decides which lines open a raw HTML block
+#: (:func:`_opens_raw_html_block`), and nothing else.
 _RAW_TEXT_TAGS = ("pre", "script", "style", "textarea")
+
+#: The RENDERED set: elements an HTML parser reads as raw text or RCDATA until
+#: their own close tag, whatever Markdown container emitted them. It is wider
+#: than the CommonMark set above because the two answer different questions —
+#: ``<title>`` and ``<iframe>`` open only a blank-terminated Markdown block
+#: (condition 6), yet a browser still swallows every later heading as element
+#: text until ``</title>`` or ``</iframe>``, so an unterminated one needs a
+#: closer at the message boundary just as ``<script>`` does. ``pre`` is kept
+#: for the nesting it allows (see :func:`_track_raw_text_elements`).
+_RENDERED_RAW_TEXT_TAGS = (
+    "pre",
+    "script",
+    "style",
+    "textarea",
+    "title",
+    "iframe",
+    "xmp",
+    "noembed",
+    "noframes",
+)
+#: Of those, the ones whose content an HTML parser does not parse at all, so a
+#: tracked opener inside them is text and only their own close tag counts.
+_OPAQUE_RENDERED_TAGS = frozenset(_RENDERED_RAW_TEXT_TAGS) - {"pre"}
 _RAW_TEXT_ELEMENT_RE = re.compile(
-    r"<(?P<close>/)?(?P<tag>" + "|".join(_RAW_TEXT_TAGS) + r")(?=[ \t/>])[^>]*>",
+    r"<(?P<close>/)?(?P<tag>" + "|".join(_RENDERED_RAW_TEXT_TAGS) + r")(?=[ \t/>])[^>]*>",
     re.IGNORECASE,
 )
 
 
-def _track_raw_text_elements(line: str, open_tags: list[str], *, in_comment: bool = False) -> None:
+def _track_raw_text_elements(
+    line: str, open_tags: list[str], *, in_comment: bool = False, markdown: bool = True
+) -> None:
     """Update rendered raw-text *open_tags* after *line*.
 
     Unlike a CommonMark HTML block, one of these elements may start inline or
     behind quote/list markers and survives the Markdown container that emitted
-    it. ``script``, ``style`` and ``textarea`` are opaque until their own close;
-    ``pre`` still contains parsed HTML and can therefore nest another tracked
-    element. Balanced inline code is masked because its apparent tags are text.
+    it. ``script``, ``style``, ``textarea``, ``title``, ``iframe`` and the other
+    :data:`_OPAQUE_RENDERED_TAGS` are opaque until their own close; ``pre``
+    still contains parsed HTML and can therefore nest another tracked element.
+
+    *markdown* says whether CommonMark interprets *line* at all. In ordinary
+    paragraph text balanced inline code is masked, because its apparent tags
+    are escaped and reach the reader as text. Inside an HTML block — a line that
+    opens one, or any later line of a raw or blank-terminated block — backticks
+    mean nothing and the tags between them are emitted verbatim, so the caller
+    passes ``markdown=False`` and the line is scanned as written: masking there
+    would hide a ``<script>`` the renderer really opens, and withhold the only
+    closer it needed.
     """
-    masked, _ = _mask_html_comments(mask_inline_code(line), in_comment)
+    scanned = mask_inline_code(line) if markdown else line
+    masked, _ = _mask_html_comments(scanned, in_comment)
     cursor = 0
     while cursor < len(masked):
-        if open_tags and open_tags[-1] in {"script", "style", "textarea"}:
+        if open_tags and open_tags[-1] in _OPAQUE_RENDERED_TAGS:
             tag = open_tags[-1]
             close = re.search(rf"</{re.escape(tag)}[ \t]*>", masked[cursor:], re.I)
             if close is None:
@@ -566,6 +603,59 @@ def _blockquote_prefix(line: str) -> tuple[str, str]:
     return line[:cursor], line[cursor:]
 
 
+def _container_steps(line: str) -> list[tuple[str, int]]:
+    """The containers *line* opens, outermost first, as ``(kind, column)`` steps.
+
+    ``("quote", 0)`` is a block quote marker; ``("list", column)`` is a list item
+    whose content starts *column* characters into whatever the enclosing steps
+    left. This is :func:`_container_prefix`'s walk with its shape kept instead
+    of its text, so a later line can be asked whether it is still INSIDE those
+    containers (:func:`_continues_containers`) — which the prefix text alone
+    cannot answer, because a list item is continued by indentation and not by
+    repeating its marker.
+    """
+    steps: list[tuple[str, int]] = []
+    remaining = line
+    while remaining:
+        quote, quoted = _blockquote_prefix(remaining)
+        if quote:
+            steps.append(("quote", 0))
+            remaining = quoted
+            continue
+        expanded = _expand_marker_tabs(remaining)
+        column = _list_item_content_column(expanded)
+        if column is None:
+            break
+        steps.append(("list", column))
+        remaining = expanded[column:]
+    return steps
+
+
+def _continues_containers(line: str, steps: list[tuple[str, int]]) -> bool:
+    """Whether *line* is still inside every container in *steps*.
+
+    Asked of the lines after a comment that opened inside a block quote. An HTML
+    block cannot be lazily continued (CommonMark §4.6 and §5.1), so the quote —
+    and the comment's hold on the Markdown — ends at the first line that does
+    not carry its marker: a quote step needs its ``>`` again, and a list step
+    needs the line indented to its content column, or blank, which a list item
+    survives. Anything less ends the container, and with it the HTML block.
+    """
+    remaining = line
+    for kind, column in steps:
+        if kind == "quote":
+            quote, remaining = _blockquote_prefix(remaining)
+            if not quote:
+                return False
+            continue
+        if not remaining.strip():
+            continue
+        if len(remaining) - len(remaining.lstrip(" ")) < column:
+            return False
+        remaining = remaining[column:]
+    return True
+
+
 def _container_prefix(line: str) -> tuple[str, str]:
     """Return every leading quote/list marker and the contained Markdown."""
     prefix = ""
@@ -656,6 +746,10 @@ def _unterminated_blocks(content: str) -> str:
     comment_prefix = ""
     comment_list_depth = 0
     comment_blocks_markdown = False
+    # The quote/list containers a QUOTED comment opened inside, so the lines
+    # after it can be asked whether that quote is still open. Empty for a
+    # comment that began anywhere else.
+    comment_steps: list[tuple[str, int]] = []
     at_paragraph_start = True
     for raw_line in content.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         # CommonMark measures leading indentation in columns with tab stops of 4;
@@ -701,6 +795,26 @@ def _unterminated_blocks(content: str) -> str:
             if in_comment and comment_blocks_markdown:
                 comment_blocks_markdown = False
 
+        # A comment that began inside a BLOCK QUOTE owns the Markdown only while
+        # the quote lasts: an HTML block cannot be lazily continued, so the first
+        # line without the quote's marker ends the quote and the HTML block with
+        # it, and that line is ordinary top-level Markdown again. The comment is
+        # still open in the rendered output — the closer is still owed — but a
+        # fence opened on this line or later is a real fence, and the closer has
+        # to land after it rather than inside it, where CommonMark would escape
+        # its "-->" and leave every later turn hidden.
+        if (
+            in_comment
+            and comment_blocks_markdown
+            and comment_steps
+            and not _continues_containers(line, comment_steps)
+        ):
+            comment_blocks_markdown = False
+            comment_steps = []
+            comment_prefix = ""
+            comment_indent = 0
+            comment_list_depth = 0
+
         # A comment that began inside raw or blank-terminated HTML outlives that
         # Markdown container in rendered HTML, but does not keep consuming
         # Markdown after the container closes. Standalone comments do consume it.
@@ -711,13 +825,16 @@ def _unterminated_blocks(content: str) -> str:
         ):
             was_in_comment = in_comment
             active_indent = raw_indent if raw_terminator else blank_indent
-            _track_raw_text_elements(line, output_raw_tags, in_comment=in_comment)
+            # Every line here is raw HTML, so backticks are text and the tags
+            # between them are emitted as written.
+            _track_raw_text_elements(line, output_raw_tags, in_comment=in_comment, markdown=False)
             _, in_comment = _mask_html_comments(line, in_comment)
             if in_comment and not was_in_comment:
                 comment_indent = active_indent
                 comment_prefix = ""
                 comment_list_depth = len(list_columns)
                 comment_blocks_markdown = False
+                comment_steps = []
             # CommonMark ends raw HTML at its terminator even when an HTML
             # comment in the emitted HTML remains open.
             if raw_terminator and raw_terminator in line.lower():
@@ -734,6 +851,7 @@ def _unterminated_blocks(content: str) -> str:
             comment_prefix = comment_prefix_candidate
             comment_list_depth = 0
             comment_blocks_markdown = True
+            comment_steps = _container_steps(line)
             at_paragraph_start = True
             continue
 
@@ -788,17 +906,32 @@ def _unterminated_blocks(content: str) -> str:
             and at_paragraph_start
             and (line.startswith("    ") or line.startswith("\t"))
         )
+        opens_comment = _opens_html_block_comment(block_line)
+        raw = _opens_raw_html_block(block_line)
+        opens_blank_terminated = _opens_blank_terminated_html_block(
+            block_line,
+            at_paragraph_start=at_paragraph_start or marker_column is not None,
+        )
         if not indented_code:
-            _track_raw_text_elements(line, output_raw_tags, in_comment=in_comment)
+            # A line that opens an HTML block is raw HTML from its first
+            # character, so its backticks are text rather than inline code and
+            # a tag between them is really emitted; any other line is Markdown.
+            _track_raw_text_elements(
+                line,
+                output_raw_tags,
+                in_comment=in_comment,
+                markdown=not (opens_comment or raw is not None or opens_blank_terminated),
+            )
             if raw_terminator and raw_terminator in line.lower():
                 raw_terminator, raw_indent, raw_blocks_markdown = "", 0, False
 
-        if _opens_html_block_comment(block_line):
+        if opens_comment:
             _, in_comment = _mask_html_comments(block_line, False)
             comment_indent = block_indent
             comment_prefix = ""
             comment_list_depth = len(list_columns)
             comment_blocks_markdown = True
+            comment_steps = []
             at_paragraph_start = True
             continue
 
@@ -810,7 +943,7 @@ def _unterminated_blocks(content: str) -> str:
                 list_fence_char, list_fence_len = fence
             else:
                 open_char, open_len = fence
-        elif (raw := _opens_raw_html_block(block_line)) is not None:
+        elif raw is not None:
             block_started = True
             # The opener line itself may contain a terminator. An HTML comment in
             # that emitted raw text remains an output-level comment even though
@@ -831,10 +964,8 @@ def _unterminated_blocks(content: str) -> str:
                 comment_prefix = ""
                 comment_list_depth = len(list_columns)
                 comment_blocks_markdown = False
-        elif _opens_blank_terminated_html_block(
-            block_line,
-            at_paragraph_start=at_paragraph_start or marker_column is not None,
-        ):
+                comment_steps = []
+        elif opens_blank_terminated:
             block_started = True
             in_blank_terminated = True
             blank_indent = block_indent
@@ -845,6 +976,7 @@ def _unterminated_blocks(content: str) -> str:
                 comment_prefix = ""
                 comment_list_depth = len(list_columns)
                 comment_blocks_markdown = False
+                comment_steps = []
         at_paragraph_start = bool(
             block_started
             or indented_code

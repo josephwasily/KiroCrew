@@ -1409,3 +1409,143 @@ def test_list_exit_edges_found_by_differential_fuzzing(content, closer):
         )
     )
     _assert_later_heading_is_structural(out)
+
+
+# ── fork-lane review (GPT 6.1) findings: three more ways a turn could hide the rest ──
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("> <!--\n```\ncode", "```\n<!-- -->"),
+        ("> <!--\n\n```\ncode", "```\n<!-- -->"),
+        ("> > <!--\n> text\n```\ncode", "```\n<!-- -->"),
+        ("- > <!--\n```\ncode", "```\n<!-- -->"),
+        ("> - <!--\n> text\n```\ncode", "```\n<!-- -->"),
+        ("> <!--\n- item\n  ```\n  code", "<!-- -->"),
+        ("> <!-- a\nb", "<!-- -->"),
+    ],
+    ids=[
+        "dedented-fence",
+        "blank-then-fence",
+        "inner-quote-ends",
+        "list-quote-dedent",
+        "quote-list-dedent",
+        "fence-in-later-list",
+        "plain-text",
+    ],
+)
+def test_gpt_6_a_quoted_comment_releases_the_markdown_when_its_quote_ends(content, closer):
+    # F1: "> <!--" opens a comment inside a block quote. An HTML block cannot be
+    # lazily continued, so the first line without the ">" marker ENDS the quote
+    # and the HTML block with it -- a dedented fence there is a real top-level
+    # fence. The scanner used to keep consuming every later line as comment
+    # content, so its "<!-- -->" closer (prefixed with "> ") landed INSIDE that
+    # unclosed fence, where CommonMark escapes "-->" and the real comment stays
+    # open over every later turn. The comment is still owed its closer; it has
+    # to come after the fence closer, and bare, since the quote is gone.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("> <!--\n> ```\n> code", "> <!-- -->"),
+        ("> - <!--\n>\n>   ```\n>   code", "> - <!-- -->"),
+    ],
+    ids=["quoted-fence", "quoted-item-blank-then-fence"],
+)
+def test_gpt_6_a_quoted_comment_still_owns_lines_that_stay_in_its_quote(content, closer):
+    # The other direction of F1: while the quote marker is still there, a fence
+    # line is comment content and opens nothing, so no fence closer is drawn --
+    # one would open a NEW top-level fence after the quote ends. A blank quoted
+    # line keeps a list item inside the quote open, so the item's lines after it
+    # are still the comment's.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("<div>\n`<script>`", "</script>"),
+        ("- <div>\n  `<script>`", "</script>"),
+        ("<pre>\n`<script>`\n</pre>", "</script>\n</pre>"),
+        ("<!-- x --> `<script>`", "</script>"),
+        ("<div>\n`<title>`", "</title>"),
+    ],
+    ids=["blank-html", "blank-html-list", "raw-html", "comment-line", "title"],
+)
+def test_gpt_7_inline_code_masking_does_not_apply_inside_raw_html(content, closer):
+    # F2: inside an HTML block backticks are ordinary characters, so a <script>
+    # "quoted" in them is emitted verbatim and really opens the element. The
+    # rendered-element scan masked balanced inline code unconditionally, so it
+    # never saw the tag and never appended the </script> every later turn needed.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+def test_gpt_7_inline_code_in_a_paragraph_is_still_text():
+    # The masking is right where CommonMark interprets the backticks: a tag in
+    # inline code inside a paragraph is escaped, opens nothing, and must draw no
+    # closer -- a stray "</script>" is harmless, but it is still not content.
+    assert sm._unterminated_blocks("use `<script>` here") == ""
+    assert sm._unterminated_blocks("use `<title>` here") == ""
+
+
+@pytest.mark.parametrize("tag", ["title", "iframe", "xmp", "noembed", "noframes"])
+def test_gpt_8_rcdata_and_raw_text_elements_outside_commonmarks_set_are_closed(tag):
+    # F3: <title> and <iframe> open only a blank-terminated HTML block in
+    # CommonMark, which needs no Markdown terminator -- but a browser reads
+    # everything after them as element text until the matching close tag, so an
+    # unterminated one still swallowed every later heading. The rendered set is
+    # therefore tracked separately from CommonMark's condition-1 set.
+    for content in (f"<{tag}>unfinished", f"text <{tag}>", f"<{tag}>\n```\ncode"):
+        assert sm._unterminated_blocks(content).endswith(f"</{tag}>"), content
+    assert sm._unterminated_blocks(f"<{tag}>a</{tag}>") == ""
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": f"<{tag}>unfinished", "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    assert f"</{tag}>" in out.split("## User")[0]
+    _assert_later_heading_is_structural(out)
+
+
+def test_gpt_8_the_markdown_raw_block_set_is_unchanged():
+    # Widening the RENDERED set must not widen the MARKDOWN one: a <title> line
+    # still opens a blank-terminated block (closed by the blank line before the
+    # separator), not a raw block that would draw a column-0 terminator of its
+    # own on top of the rendered-element closer.
+    assert sm._opens_raw_html_block("<title>") is None
+    assert sm._opens_raw_html_block("<iframe>") is None
+    assert sm._unterminated_blocks("<title>x") == "</title>"
+    assert sm._unterminated_blocks("<pre>\n<title>x\n</pre>") == "</title>\n</pre>"
