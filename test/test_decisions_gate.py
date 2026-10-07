@@ -831,6 +831,23 @@ class TestScrub:
         assert oracle.entered is False
         assert log_home()[0]["scrubbed"] is True
 
+    def test_a_credential_in_a_choice_criteria_is_found(self, install_impl, log_home):
+        """``Choice.criteria`` rubric text leaves the machine in the same request,
+        so it is scanned beside the state. Without this, dropping ``criteria`` from
+        ``question_texts`` turns no test red -- the fail-safe claim would be unpinned."""
+        oracle = install_impl(_ExplodingOracle())
+        questions = [
+            Choice(
+                id="q",
+                prompt="which?",
+                options=["fine", "risky"],
+                criteria={"risky": f"use when the key {_AWS_KEY_SAMPLES[0]} is present"},
+            )
+        ]
+        assert asyncio.run(decide(POINT, "clean state", questions, config=_config())) is None
+        assert oracle.entered is False
+        assert log_home()[0]["scrubbed"] is True
+
     @pytest.mark.parametrize(
         "make",
         [

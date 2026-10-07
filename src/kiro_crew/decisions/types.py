@@ -37,9 +37,12 @@ class Choice:
     rather than inferring it from the option name alone. It maps an option to its
     rubric text; an option left out, or the whole field left unset, sends that
     option with no rubric -- today's wire shape -- so a point gains nothing until
-    it authors text and nothing changes for one that does not. Any text supplied
-    travels in the request, so it is scanned by the same scrub as the rest of the
-    payload (see :func:`question_texts`).
+    it authors text and nothing changes for one that does not. No point in-repo
+    sets it yet, so the field is inert on the current wire; it is read only by the
+    Jev lane, so any text a point adds later reaches Jev alone and the LLM judge
+    lane (``impl_llm``) renders none of it. Any text supplied travels in the
+    request, so it is scanned by the same scrub as the rest of the payload (see
+    :func:`question_texts`).
     """
 
     id: str

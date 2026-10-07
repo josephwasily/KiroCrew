@@ -388,6 +388,36 @@ class TestResponseMetadata:
         _answers, oracle = asyncio.run(_run_oracle(rec, [URGENT]))
         assert oracle.last_response_meta is None
 
+    def test_metadata_is_not_set_when_the_response_fails_validation(self):
+        """``last_response_meta`` is assigned only after ``_from_wire`` accepts the
+        parse. A body that stamps a model but carries no ``answers`` object fails
+        validation, so the oracle keeps ``None`` and the gate's error row carries no
+        metadata -- without this, setting it before the parse turns no test red."""
+        rec = _Recorder(
+            body={"model": "jev-latest", "usage": {"input_tokens": 1}},
+            resp_headers={"x-typesafe-request-id": "req_should_not_be_kept"},
+        )
+
+        async def _go():
+            server = TestServer(rec.app(), host="127.0.0.1")
+            await server.start_server()
+            try:
+                provider = DecisionProviderConfig(
+                    endpoint=f"http://localhost:{server.port}/v1/systemone",
+                    api_key=VAULT_REF,
+                    model="jev-latest",
+                )
+                oracle = JevOracle(provider)
+                assert oracle.last_response_meta is None
+                with pytest.raises(JevProtocolError, match="no 'answers' object"):
+                    await oracle.ask("hi", [URGENT])
+                return oracle
+            finally:
+                await server.close()
+
+        oracle = asyncio.run(_go())
+        assert oracle.last_response_meta is None
+
     def test_the_reported_model_can_differ_from_the_requested_alias(self):
         """``jev-latest`` is an alias; the row records the concrete model answered with."""
         rec = _Recorder(
