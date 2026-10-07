@@ -2930,6 +2930,10 @@ async def _handle_session_resume(
 
 
 _resume_locks: dict[str, LoopBoundLock] = {}
+_RESUME_CLOSED_MSG = (
+    "That chat is closed and could not be resumed. "
+    "Open it from the dashboard History tab, then run resume again."
+)
 
 
 async def _handle_resume_choice(
@@ -3055,9 +3059,21 @@ async def _handle_resume_choice(
             source="slack",
             resources=session_key,
         )
+        linked = True
         if _orch.dashboard_state:
             slot_name = session_key.split(":", 1)[-1] if ":" in session_key else session_key
-            _orch.dashboard_state.link_slack(slot_name, link_ts, link_channel)
+            ok = _orch.dashboard_state.link_slack(slot_name, link_ts, link_channel)
+            # Only a dashboard chat has a slot; other sessions resume without one.
+            linked = ok is not False or not session_key.startswith("dashboard:")
+        if not linked:
+            # The chat is closed: say so instead of "resumed", and drop the link
+            # so a resume after reopening it is not refused as "already active".
+            _orch.sessions.clear_slack_link(session_key)
+            label = _RESUME_CLOSED_MSG
+            try:
+                await _orch.slack.update_message(link_channel, link_ts, label)
+            except Exception:
+                logger.debug("Failed to mark resume header as closed", exc_info=True)
 
         # Post last 5 messages as context
         try:
@@ -3068,7 +3084,7 @@ async def _handle_resume_choice(
             jsonl = sess_dir / f"{stem}.jsonl"
             if not jsonl.exists() and not stem.startswith("dashboard_"):
                 jsonl = sess_dir / f"dashboard_{stem}.jsonl"
-            if jsonl.exists():
+            if linked and jsonl.exists():
                 # Whole-transcript read, bounded only by conversation length
                 # (multi-MB for long sessions) — off-loop so it cannot stall
                 # the event loop and its watchdog heartbeat.

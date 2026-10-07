@@ -7580,11 +7580,16 @@ class DashboardState:
         """Resolve an exact key or the newest timestamped bare ``chat-N`` key."""
         return _registry_for(self).resolve_slot(self, name, _CHAT_N_RE.fullmatch)
 
-    def link_slack(self, slot_name: str, thread_ts: str, channel_id: str) -> None:
-        """Update a slot's Slack link state and persist to SessionStore."""
+    def link_slack(self, slot_name: str, thread_ts: str, channel_id: str) -> bool:
+        """Update a slot's Slack link state and persist to SessionStore.
+
+        Returns False, with a warning, when no live slot has that name (a
+        closed chat), so a caller does not report a link that never happened.
+        """
         slot = self._slots.get(slot_name)
         if not slot:
-            return
+            logger.warning("slack link skipped: no live slot %r (chat closed?)", slot_name)
+            return False
         # A thread handoff is ONE action with TWO persisted writes: the previous
         # owner's link is cleared and this slot's is claimed. Each write rewrites
         # the whole session map, so as two separate writes they are separately
@@ -7596,6 +7601,7 @@ class DashboardState:
         with self.sessions.batched_save() if self.sessions else contextlib.nullcontext():
             self._link_slack_persisted(slot, slot_name, thread_ts, channel_id)
         self.push_slots_update()
+        return True
 
     def _link_slack_persisted(
         self, slot: Any, slot_name: str, thread_ts: str, channel_id: str
