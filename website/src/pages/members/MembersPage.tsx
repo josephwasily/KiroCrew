@@ -28,10 +28,11 @@
  * thread, so the UI does not announce it — there is no unpinned state to
  * contrast against.
  *
- * Which crewmate is open rides the URL (`?member=<name>`), and the last one
- * opened is remembered per browser: a visit that names no one lands on the
- * remembered crewmate if it is still on the roster, else on the most recently
- * USED chat (greatest `last_active_ts`). That is the conversation the user
+ * Which crewmate is open rides the URL (`?member=<name>`). A visit that names
+ * no one lands on the crewmate the user last CHATTED with (`last_chat_ts`, a
+ * server record, so it survives a gateway restart), else on the one last
+ * opened in this browser if it is still on the roster, else on the most
+ * recently USED chat (greatest `last_active_ts`). That is the conversation the user
  * most plausibly came back for, and it is a property of the user's own
  * history, not of the list order: #11763 rejected priming the user on
  * whichever row the SORT floated to the top, and that still holds — the
@@ -202,6 +203,8 @@ export function resolveDefaultMember(
   remembered: string | null,
   ordered: readonly MemberRosterRow[],
 ): MemberRosterRow | undefined {
+  const chatted = lastChattedMember(ordered)
+  if (chatted) return chatted
   if (remembered && remembered !== 'default') {
     const hit = ordered.find((m) => m.name === remembered)
     if (hit) return hit
@@ -210,6 +213,21 @@ export function resolveDefaultMember(
   for (const m of ordered) {
     if (m.name === 'default') continue
     if (!best || (m.last_active_ts ?? 0) > (best.last_active_ts ?? 0)) best = m
+  }
+  return best
+}
+
+/** The crewmate the user last sent a message to (`last_chat_ts`, recorded by
+ *  the server, so it survives a gateway restart and a new browser alike), in
+ *  its DM or in a normal chat. It outranks this browser's remembered pick: the
+ *  page reopens the conversation the user last HAD, not the row they last
+ *  clicked. The built-in `default` assistant is not a crewmate. Strict `>` so
+ *  a tie keeps the first in `rows`. */
+export function lastChattedMember(rows: readonly MemberRosterRow[]): MemberRosterRow | undefined {
+  let best: MemberRosterRow | undefined
+  for (const m of rows) {
+    if (m.name === 'default' || !((m.last_chat_ts ?? 0) > 0)) continue
+    if (!best || (m.last_chat_ts ?? 0) > (best.last_chat_ts ?? 0)) best = m
   }
   return best
 }
@@ -1680,8 +1698,8 @@ export default function MembersPage() {
     () => ({ search: filter, starredOnly, source: sourceFilter, status: statusFilter, sort, defaultAgent, chosen: activeName }),
     [filter, starredOnly, sourceFilter, statusFilter, sort, defaultAgent, activeName],
   )
-  // The rows the roster is about right now: created crewmates and the default
-  // crew, or -- with a search typed -- whatever the search reaches, hidden rows
+  // The rows the roster is about right now: crewmates the user chatted with
+  // (or starred), or -- with a search typed -- whatever the search reaches, hidden rows
   // included. The header count, the "N of M" and the filter menu's tallies read
   // THIS list, never `members`, so no count includes a row the user cannot see.
   const shownMembers = useMemo(() => rosterPopulation(members, rosterFilterQuery), [members, rosterFilterQuery])
@@ -2588,8 +2606,8 @@ export default function MembersPage() {
   // the shown population: hidden rows are not "filtered out", they are unlisted.
   const filteredOut =
     loaded && !loadError && shownMembers.length > 0 && sortedMembers.length === 0 && !filter.trim()
-  // Every crewmate exists but the listing rule hides them all (none chatted,
-  // created here, starred or the default crew): say so and name the search as
+  // Every crewmate exists but the listing rule hides them all (none chatted
+  // with, none starred): say so and name the search as
   // the way in, rather than an empty list under "0 crewmates".
   const allHidden =
     loaded && !loadError && !filter.trim() && shownMembers.length === 0 && !hasNoCrewmates(members)
@@ -2873,8 +2891,13 @@ export default function MembersPage() {
     const remembered = safeGetItem(LAST_MEMBER_KEY)
     const rememberedRow =
       remembered && remembered !== 'default' ? members.find((m) => m.name === remembered) : undefined
+    // The last crewmate the user CHATTED with outranks the memory (it is the
+    // server's record, so a restart or a new browser keeps it).
     const target =
-      rememberedRow ?? resolveDefaultMember(null, listedMembers) ?? resolveDefaultMember(null, orderedMembers)
+      lastChattedMember(orderedMembers) ??
+      rememberedRow ??
+      resolveDefaultMember(null, listedMembers) ??
+      resolveDefaultMember(null, orderedMembers)
     if (!target) {
       // Named a gone crewmate on an empty roster: say where they went above
       // the roster (shown: '' marks the roster variant of the notice, as

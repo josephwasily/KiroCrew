@@ -216,7 +216,7 @@ vi.mock('react-router-dom', async (importOriginal) => {
 
 import { api } from '../../api/client'
 import NewCrewmateDialog, { CACHE_WARM_BOUND_MS, RECONCILE_BOUND_MS } from './NewCrewmateDialog'
-import MembersPage, { CREW_DASHBOARD_TAB_ID, CREW_PANEL_TAB_IDS, MEMBERS_UNCONFIRMED_WITHHELD_VIEWS, MEMBERS_UNFED_VIEWS, MEMBERS_WITHHELD_VIEWS, resolveDefaultMember } from './MembersPage'
+import MembersPage, { CREW_DASHBOARD_TAB_ID, CREW_PANEL_TAB_IDS, MEMBERS_UNCONFIRMED_WITHHELD_VIEWS, MEMBERS_UNFED_VIEWS, MEMBERS_WITHHELD_VIEWS, lastChattedMember, resolveDefaultMember } from './MembersPage'
 import { __resetPanelTabs, VIEW_DATA_SOURCE } from '../../hooks/usePanelTabs'
 
 /** The page's own memory key (mirrors the constant in MembersPage.tsx). */
@@ -4076,6 +4076,43 @@ describe('resolveDefaultMember', () => {
   it('an empty roster resolves to undefined, never throws', () => {
     expect(resolveDefaultMember('beta', [])).toBeUndefined()
     expect(resolveDefaultMember(null, [])).toBeUndefined()
+  })
+
+  it('the crewmate the user last CHATTED with outranks the memory and background activity', () => {
+    // The server's record survives a gateway restart; the browser memory and a
+    // patrol's last_active_ts do not say who the user last talked to.
+    const chatted = [
+      row({ name: 'alpha', slug: 'alpha', last_active_ts: 900, last_chat_ts: 100 }),
+      row({ name: 'beta', slug: 'beta', last_active_ts: 10, last_chat_ts: 300 }),
+      row({ name: 'default', slug: 'default', last_chat_ts: 999 }),
+    ]
+    expect(lastChattedMember(chatted)?.name).toBe('beta')
+    expect(resolveDefaultMember('alpha', chatted)?.name).toBe('beta')
+    expect(lastChattedMember([row({ name: 'alpha', slug: 'alpha', last_chat_ts: 0 })])).toBeUndefined()
+  })
+})
+
+describe('MembersPage lists only crewmates the user chatted with', () => {
+  it('opens the last-chatted crewmate and the roster lists only chatted ones, newest first', async () => {
+    localStorage.setItem(LAST_MEMBER_KEY, 'bg-only')
+    await renderPage([
+      // Background work wrote into its thread; the user never sent it anything.
+      row({ name: 'bg-only', slug: 'bg-only', last_active_ts: 900, has_dm_message: true, dashboard_created: true, last_chat_ts: 0 }),
+      row({ name: 'app-bot', slug: 'app-bot', last_active_ts: 800, last_chat_ts: 0 }),
+      row({ name: 'older', slug: 'older', last_active_ts: 1, last_chat_ts: 100 }),
+      row({ name: 'newest', slug: 'newest', last_active_ts: 2, last_chat_ts: 300 }),
+    ])
+    expect(await screen.findByTestId('chat-pane-stub', undefined, PANE_READY)).toHaveTextContent('member-newest')
+    expect(currentUrl()).toBe('/members?member=newest')
+    const names = () =>
+      roster()
+        .getAllByRole('listitem')
+        .map((li) => within(li).queryByText(/^(bg-only|app-bot|older|newest)$/)?.textContent)
+        .filter(Boolean)
+    await waitFor(() => expect(names()).toEqual(['newest', 'older']))
+    // The search still reaches a hidden crewmate.
+    fireEvent.change(screen.getByTestId('member-search'), { target: { value: 'bg' } })
+    await waitFor(() => expect(names()).toEqual(['bg-only']))
   })
 })
 
