@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import subprocess
 from contextlib import redirect_stdout
+from pathlib import Path
 
 import pytest
 
@@ -70,18 +71,65 @@ def test_below_the_floor_fails_with_the_exact_version(monkeypatch, version: str)
 
 
 @pytest.mark.parametrize("glibc", [(2, 26), (2, 17), (2, 27), (1, 99)])
-def test_old_glibc_points_at_ensure_node_not_nodejs_org(monkeypatch, glibc) -> None:
+def test_old_glibc_x86_64_with_script_names_the_ensure_node_path(monkeypatch, glibc) -> None:
     # Amazon Linux 2 ships glibc 2.26: official Node >= 18 binaries fail to LOAD
     # ("GLIBC_2.28 not found"), so the default nodejs.org / nvm advice is a dead
-    # end. Below the official floor the message must point at ensure-node.sh /
-    # kirocrew update (the glibc-2.17 build) instead.
+    # end. On x86_64 where the bundled script ships, the message names `bash
+    # <path>` directly (ensure-node.sh unpacks the glibc-2.17 build), with the
+    # action FIRST, NOT the updater (a no-op when the checkout is up to date).
+    script_path = Path("/opt/kc/ensure-node.sh")
     monkeypatch.setattr(constants, "_host_glibc_version", lambda: glibc)
+    monkeypatch.setattr(constants.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr("kiro_crew.env._ensure_node_script", lambda: script_path)
     msg = node_too_old_message((17, 9, 1))
     assert f"Kiro Crew needs {FLOOR_TEXT} or newer" in msg
-    assert "kirocrew update" in msg
-    assert "ensure-node.sh" in msg
+    # str(Path) is OS-shaped, so assert the form the code actually emits.
+    assert f"bash {script_path}" in msg
+    assert "glibc-2.17 Node" in msg
     assert f"glibc ({glibc[0]}.{glibc[1]})" in msg
-    # The dead-end advice must NOT be the remedy offered here.
+    # The dead-end advice must NOT be offered.
+    assert "nvm install 24" not in msg
+    assert "install 24 LTS" not in msg
+    assert "kirocrew update" not in msg
+    # Action leads, explanation trails (reason is parenthetical at the end).
+    assert msg.index(f"bash {script_path}") < msg.index("older than the official")
+
+
+@pytest.mark.parametrize("glibc", [(2, 26), (2, 17), (2, 27), (1, 99)])
+def test_old_glibc_x86_64_wheel_points_at_the_unofficial_build(monkeypatch, glibc) -> None:
+    # pip/wheel install on x86_64: no bundled script (_ensure_node_script ->
+    # None), but the x64 glibc-2.17 build STILL runs here -- so point the user at
+    # it directly, never at a costly machine migration or build-from-source.
+    monkeypatch.setattr(constants, "_host_glibc_version", lambda: glibc)
+    monkeypatch.setattr(constants.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr("kiro_crew.env._ensure_node_script", lambda: None)
+    msg = node_too_old_message((17, 9, 1))
+    # Assert the full remedy phrase (with scheme + surrounding words) rather than
+    # a bare host substring -- a bare "host in url" check trips CodeQL's
+    # py/incomplete-url-substring-sanitization, and this is expected OUTPUT text,
+    # not URL validation.
+    assert "Install the glibc-2.17 Node build from https://unofficial-builds.nodejs.org" in msg
+    assert f"glibc ({glibc[0]}.{glibc[1]})" in msg
+    assert "build Node from source" not in msg  # the build exists; don't say that
+    assert "No glibc-2.17 Node build is published" not in msg
+    assert "nvm install 24" not in msg
+    assert "install 24 LTS" not in msg
+
+
+@pytest.mark.parametrize("machine", ["aarch64", "arm64"])
+def test_old_glibc_aarch64_says_no_arm_build_exists(monkeypatch, machine) -> None:
+    # aarch64 / Graviton: upstream publishes no arm64 glibc-2.17 build, so the
+    # message must NOT offer ensure-node.sh / unofficial-builds and must tell the
+    # truth: no ARM build exists; move to a newer base or build from source.
+    monkeypatch.setattr(constants, "_host_glibc_version", lambda: (2, 26))
+    monkeypatch.setattr(constants.platform, "machine", lambda: machine)
+    msg = node_too_old_message((17, 9, 1))
+    assert "No glibc-2.17 Node build is published for this CPU" in msg
+    assert "Amazon Linux 2023" in msg
+    assert "build Node from source" in msg
+    assert "ensure-node.sh" not in msg
+    assert "Install the glibc-2.17 Node build from https://unofficial-builds.nodejs.org" not in msg
+    assert "kirocrew update" not in msg
     assert "nvm install 24" not in msg
     assert "install 24 LTS" not in msg
 
@@ -121,6 +169,10 @@ def test_host_glibc_version_reads_libc_ver(monkeypatch) -> None:
     monkeypatch.setattr(_platform, "libc_ver", lambda *a, **k: ("libc", ""))
     assert constants._host_glibc_version() is None
     monkeypatch.setattr(_platform, "libc_ver", lambda *a, **k: ("glibc", "weird"))
+    assert constants._host_glibc_version() is None
+    # musl with a PARSEABLE version must still be rejected on the name, not the
+    # version-parse path -- removing the `name != "glibc"` guard reddens here.
+    monkeypatch.setattr(_platform, "libc_ver", lambda *a, **k: ("musl", "1.2"))
     assert constants._host_glibc_version() is None
 
 
