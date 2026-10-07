@@ -1055,6 +1055,11 @@ class AcpSessionHandle:
         # the prompt about to go out, so no steer is sent until it is set.
         self._prompt_written: bool = False
         self.native_context_documents: dict[str, str] = {}
+        # Whether THIS session's array carries the member session-control entry.
+        # Set by the composer that decided it (create and load alike), and read
+        # by the context builder so the member operating-mode block is injected
+        # only when the session actually holds the tools that block teaches.
+        self.member_dispatch_mounted: bool = False
         self._queue = queue
         self._runtime = runtime
         # The directory THIS session was opened against, which on a shared runtime is

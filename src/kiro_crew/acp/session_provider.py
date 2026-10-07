@@ -568,6 +568,12 @@ class AcpSessionProvider(LLMProvider):
         return dict(self._handle.native_context_documents)
 
     @property
+    def member_dispatch_mounted(self) -> bool | None:
+        # A handle that never recorded an answer is no evidence, not a refusal.
+        mounted = getattr(self._handle, "member_dispatch_mounted", None)
+        return None if mounted is None else bool(mounted)
+
+    @property
     def native_steering(self) -> bool:
         from kiro_crew.acp.types import ACP_BACKEND_KAS
 
