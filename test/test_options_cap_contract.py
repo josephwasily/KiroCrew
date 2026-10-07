@@ -16,10 +16,18 @@ half is pinned here too, because dropping the list deletes the answers to a
 question the agent just asked and the user is left with a prompt and no way to
 see what it offered.
 
+One zero-widget channel does NOT number the choices: WhatsApp drops the trailer
+instead. That is a recorded GAP rather than a position
+(``whatsapp/transport.py``: "Losing the list is a gap rather than a position";
+``docs/channel-capabilities.md``: "WhatsApp drops the list instead, and that is a
+gap rather than a setting"). Whether to number or keep stripping is a human
+decision, so this file does not change the behaviour — it only pins WhatsApp as
+the exception in ``STRIPS_NOT_NUMBERS`` so the ratchet below SEES it.
+
 Two ratchets keep both halves exhaustive: a channel that starts declaring
 ``max_buttons > 0`` without a pin in this file fails
 ``test_every_widget_channel_is_pinned_here``, and a zero-widget channel absent
-from ``ZERO_WIDGET_RENDERERS`` fails
+from BOTH ``ZERO_WIDGET_RENDERERS`` and ``STRIPS_NOT_NUMBERS`` fails
 ``test_every_zero_widget_channel_is_pinned_here``. The second is keyed on a
 renderer FACTORY rather than a name, because ``text()`` is not on the ``Renderer``
 ABC — nothing in code forces a zero-widget renderer to call the helper, so the
@@ -88,6 +96,26 @@ ZERO_WIDGET_RENDERERS: dict[str, Callable[[], Any]] = {
 }
 
 
+def _whatsapp_renderer() -> Any:
+    from kiro_crew.whatsapp.transport import WHATSAPP_CAPABILITIES
+    from kiro_crew.whatsapp.turn_renderer import WhatsAppRenderer
+
+    return WhatsAppRenderer(object(), object(), "chat@s.whatsapp.net", WHATSAPP_CAPABILITIES)
+
+
+#: Zero-widget channels that DROP the trailer rather than numbering it. WhatsApp
+#: is the one such channel, and the strip is a recorded GAP rather than a position
+#: (``whatsapp/transport.py``, ``docs/channel-capabilities.md``) — whether to
+#: number or keep stripping is a human decision this file does not make. It is a
+#: factory for the same reason as ``ZERO_WIDGET_RENDERERS``: the exemption is
+#: driven against the REAL renderer, not satisfied by a bare name. A future
+#: zero-widget channel still trips ``test_every_zero_widget_channel_is_pinned_here``
+#: until it is placed in one map or the other.
+STRIPS_NOT_NUMBERS: dict[str, Callable[[], Any]] = {
+    "whatsapp": _whatsapp_renderer,
+}
+
+
 def _all_channel_capabilities() -> dict[str, TransportCapabilities]:
     from kiro_crew.discord.transport import DISCORD_CAPABILITIES
     from kiro_crew.feishu.transport import FEISHU_CAPABILITIES
@@ -98,6 +126,7 @@ def _all_channel_capabilities() -> dict[str, TransportCapabilities]:
     from kiro_crew.webex.transport import WEBEX_CAPABILITIES
     from kiro_crew.wecom.transport import WECOM_CAPABILITIES
     from kiro_crew.weixin.transport import WEIXIN_CAPABILITIES
+    from kiro_crew.whatsapp.transport import WHATSAPP_CAPABILITIES
 
     return {
         "slack": SLACK_CAPABILITIES,
@@ -109,6 +138,7 @@ def _all_channel_capabilities() -> dict[str, TransportCapabilities]:
         "weixin": WEIXIN_CAPABILITIES,
         "imessage": IMESSAGE_CAPABILITIES,
         "feishu": FEISHU_CAPABILITIES,
+        "whatsapp": WHATSAPP_CAPABILITIES,
     }
 
 
@@ -125,18 +155,23 @@ class TestRatchet:
         )
 
     def test_every_zero_widget_channel_is_pinned_here(self) -> None:
-        # Keyed on the FACTORY map, not a set of names: a name could be added to
+        # Keyed on the FACTORY maps, not a set of names: a name could be added to
         # a bare set to make this green, which would leave the channel with no
-        # actual pin -- nothing in code forces a renderer to call the helper.
+        # actual pin -- nothing in code forces a renderer to call the helper. A
+        # zero-widget channel is pinned either as a numbering channel
+        # (ZERO_WIDGET_RENDERERS) or as the recorded strip exception
+        # (STRIPS_NOT_NUMBERS), both driven against the real renderer.
         zero_widget = {
             name for name, caps in _all_channel_capabilities().items() if caps.max_buttons == 0
         }
-        assert zero_widget == set(ZERO_WIDGET_RENDERERS), (
+        pinned = set(ZERO_WIDGET_RENDERERS) | set(STRIPS_NOT_NUMBERS)
+        assert zero_widget == pinned, (
             "A channel's max_buttons declaration changed. Every channel "
             "declaring max_buttons == 0 needs a renderer factory in "
-            "ZERO_WIDGET_RENDERERS so its numbered-text fallback is driven here. "
-            f"unpinned={zero_widget - set(ZERO_WIDGET_RENDERERS)} "
-            f"stale={set(ZERO_WIDGET_RENDERERS) - zero_widget}"
+            "ZERO_WIDGET_RENDERERS (numbers the choices) or STRIPS_NOT_NUMBERS "
+            "(the recorded strip exception) so its behaviour is driven here. "
+            f"unpinned={zero_widget - pinned} "
+            f"stale={pinned - zero_widget}"
         )
 
     def test_the_two_pinned_sets_cover_every_channel(self) -> None:
@@ -144,7 +179,7 @@ class TestRatchet:
         # shipped set. A NEGATIVE max_buttons would land in neither and is the
         # only way to sit in the gap between the two ratchets above.
         assert set(_all_channel_capabilities()) == (
-            PINNED_WIDGET_CHANNELS | set(ZERO_WIDGET_RENDERERS)
+            PINNED_WIDGET_CHANNELS | set(ZERO_WIDGET_RENDERERS) | set(STRIPS_NOT_NUMBERS)
         )
 
 
