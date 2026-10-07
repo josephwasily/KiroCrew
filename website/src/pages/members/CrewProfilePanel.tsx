@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type HTMLAttributes, type ReactNode } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { AlarmClock, Brain, ChevronLeft, ChevronRight, Cpu, FolderOpen, Goal, IdCard, NotebookPen, Pencil, Route, Shield, X } from 'lucide-react'
+import { AlarmClock, Brain, ChevronLeft, ChevronRight, FolderOpen, Goal, IdCard, NotebookPen, Pencil, Route, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { MemberRosterRow } from '../../api/client'
 import { crewDisplayName } from '../../components/AgentSelector'
@@ -48,6 +48,9 @@ export interface CrewProfilePanelProps {
   newScheduleBody: ReactNode
   sessionsBody: ReactNode
   notesBody: ReactNode
+  /** The crewmate's permission, model and effort controls (CrewProfileSettings).
+   *  They are set here, never in the chat composer. */
+  settingsBody?: ReactNode
   onClose: () => void
   /** Runs a pushed-page back action through the host's draft guard. */
   onRequestBack: (proceed: () => void) => void
@@ -118,7 +121,8 @@ function Tile({ icon, tone, label, value, title, onClick, testId }: {
  * (crewmate-panel IA). One crewmate: face, name, role and what it is doing now
  * on top; four tabs under that, the shared `Tablist` rail with icons only and
  * the selected tab's word. Profile is a summary with doors (edit, description,
- * memory, workspace, notes, permissions, model); Schedules is a readable list of
+ * memory, workspace, notes) plus the crewmate's own settings (permission,
+ * model, effort); Schedules is a readable list of
  * what wakes it; Sessions is the sessions it is driving; Goals holds its place
  * as coming soon.
  *
@@ -317,9 +321,9 @@ export default function CrewProfilePanel(p: CrewProfilePanelProps) {
 
                 <div className="rounded-2xl border border-border bg-bg overflow-hidden">
                   <Row icon={<NotebookPen size={16} />} tone="warn" label={t('pages.membersPage.notes_tab')} sub={t('pages.membersPage.profile_notes_sub')} onClick={() => push('notes')} testId="crew-profile-notes" />
-                  <Row icon={<Shield size={16} />} tone="ok" label={t('pages.membersPage.profile_permissions')} sub={t('pages.membersPage.profile_permissions_sub')} onClick={p.onEdit} testId="crew-profile-permissions" />
-                  <Row icon={<Cpu size={16} />} tone="info" label={t('pages.membersPage.profile_model')} sub={p.member.model || t('pages.membersPage.profile_model_auto')} onClick={p.onEdit} testId="crew-profile-model" />
                 </div>
+
+                {p.settingsBody}
               </div>
             )}
             {tab === 'schedule' && (

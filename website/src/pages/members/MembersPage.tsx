@@ -64,6 +64,8 @@ import { teamsQuery } from '../../api/teamsQuery'
 // opens the modal, and keeping it eager pushed App over its bundle budget. The
 // hook stays eager: it is called every render to drive the pill's open state.
 const CrewEditorDialog = lazy(() => import('../../components/crew/CrewEditorDialog'))
+// Lazy for the same reason: its fields come from the crew manager page module.
+const CrewProfileSettings = lazy(() => import('./CrewProfileSettings'))
 // A tiny NON-lazy fallback shown while the CrewEditorDialog chunk downloads on a
 // cold-cache first open, so the pill click gives immediate feedback instead of
 // rendering nothing until the chunk lands. Deliberately plain (no Radix dialog)
@@ -113,6 +115,7 @@ import { threadsApi, threadsQueryKey } from '../../api/threads'
 import ThreadPanel from './ThreadPanel'
 import CrewmateSwitcher from './CrewmateSwitcher'
 import CrewProfilePanel, { type ProfileTab } from './CrewProfilePanel'
+import CrewComposer from './CrewComposer'
 import { createPortal } from 'react-dom'
 import { useCrewmateThreadsFlag } from '../../hooks/useCrewmateThreadsFlag'
 import { CrewDashboardFrame } from './CrewWebview'
@@ -4041,6 +4044,7 @@ export default function MembersPage() {
                   <ChatPane
                     slotKey={activeSlot}
                     agentLocked
+                    composerInput={CrewComposer}
                     frameless
                     followContentWidth
                     // The failure notice above owns the verdict on this thread
@@ -4257,6 +4261,7 @@ export default function MembersPage() {
               newScheduleBody={schedulesBody}
               sessionsBody={sessionsBody}
               notesBody={notesBody}
+              settingsBody={<Suspense fallback={null}><CrewProfileSettings member={activeView} slotKey={activeSlot || active.slot_key} /></Suspense>}
               faceLayoutId={profile.placement === 'column' ? CREW_FACE_LAYOUT_ID : undefined}
               onClose={requestCloseProfile}
               onRequestBack={requestProfileBack}

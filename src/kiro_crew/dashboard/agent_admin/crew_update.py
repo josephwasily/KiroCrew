@@ -204,6 +204,18 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
     # bad `starred` with an avatar promotion would otherwise move the staged
     # picture and then 400 without rolling it back. Strictly a bool: a string
     # "false" from a hand-typed request must not read as truthy and star the crew.
+    # Local: ``compose`` rebinds this module's functions onto the agents
+    # handler namespace, so a module-level import here is not in scope.
+    from kiro_crew.config.sections import MEMBER_APPROVAL_MODES
+
+    if "approval_mode" in body and body["approval_mode"] not in MEMBER_APPROVAL_MODES:
+        return web.json_response(
+            {
+                "error": "approval_mode must be one of " + ", ".join(MEMBER_APPROVAL_MODES),
+                "code": "invalid_approval_mode",
+            },
+            status=400,
+        )
     if "starred" in body and not isinstance(body["starred"], bool):
         return web.json_response(
             {"error": "starred must be a boolean", "code": "invalid_starred"}, status=400
@@ -323,6 +335,11 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
             # Already validated above; "" is the inherit sentinel and clears a pin.
             agent.reasoning_effort = body["reasoning_effort"].strip()
             changed.append("reasoning_effort")
+        if "approval_mode" in body:
+            # Validated above. Only ever a real choice: the profile never sends
+            # "" back, so a pinned mode cannot fall back to the trust default.
+            agent.approval_mode = body["approval_mode"]
+            changed.append("approval_mode")
         if "description" in body:
             agent.description = body["description"]
             changed.append("description")

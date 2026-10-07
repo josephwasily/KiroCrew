@@ -179,12 +179,14 @@ vi.mock('../../utils/terminalRegistry', () => ({
 }))
 vi.mock('../../hooks/useDevMode', () => ({ useDevMode: () => false }))
 
+/** The page's own composer, read lazily so the ChatPane stub can compare identity. */
+const CrewComposerRef = vi.hoisted(() => ({ current: null as unknown }))
 /* ChatPane is the full chat stack (WS, Redux slot machinery). The page's own
  * contract is only "mount it with the thread's slot key", so a stub that
  * ECHOES the slot key is the strongest cheap assertion available. */
 vi.mock('../../components/ChatPane', () => ({
-  default: ({ slotKey, agentLocked, followContentWidth, busyMode, onOpenCommandCenter }: { slotKey: string; agentLocked?: boolean; followContentWidth?: boolean; busyMode?: string; onOpenCommandCenter?: () => void }) => (
-    <div data-testid="chat-pane-stub" data-agent-locked={agentLocked ? '1' : '0'} data-follow-content-width={followContentWidth ? '1' : '0'} data-busy-mode={busyMode ?? 'split'}>
+  default: ({ slotKey, agentLocked, followContentWidth, busyMode, onOpenCommandCenter, composerInput }: { slotKey: string; agentLocked?: boolean; followContentWidth?: boolean; busyMode?: string; onOpenCommandCenter?: () => void; composerInput?: unknown }) => (
+    <div data-testid="chat-pane-stub" data-agent-locked={agentLocked ? '1' : '0'} data-follow-content-width={followContentWidth ? '1' : '0'} data-busy-mode={busyMode ?? 'split'} data-crew-composer={composerInput === CrewComposerRef.current ? '1' : '0'}>
       {slotKey}
       {onOpenCommandCenter && <button onClick={onOpenCommandCenter}>Open task dashboard</button>}
     </div>
@@ -809,6 +811,7 @@ describe('MembersPage thread', () => {
   })
 
   it('opens the pinned DM thread on click: creates the thread and mounts the chat stack on its slot', async () => {
+    CrewComposerRef.current = (await import('./CrewComposer')).default
     await renderPage()
     fireEvent.click(await rosterRow('oncall'))
     await waitFor(() => expect(api.memberThread).toHaveBeenCalledWith('oncall'))
@@ -827,6 +830,9 @@ describe('MembersPage thread', () => {
     // A send while the member is working gets the main chat's Steer / Queue /
     // Jev auto split, so the Members page must NOT ask for 'steer-only'.
     expect(pane).toHaveAttribute('data-busy-mode', 'split')
+    // The Crew page draws its own composer (no model / effort / permission /
+    // context toolbar), not the ordinary chat one.
+    expect(pane).toHaveAttribute('data-crew-composer', '1')
     // The pin is an invariant of every member thread, so the header does NOT
     // announce it — no chip, no term for a state that cannot be otherwise.
     expect(screen.queryByTestId('member-pin-chip')).toBeNull()
