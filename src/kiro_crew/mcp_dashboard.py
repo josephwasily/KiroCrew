@@ -1066,17 +1066,20 @@ def _session_tools() -> tuple[Tool, ...]:
                 "now — the roster a conductor patrols. Each row is `working` (a "
                 "turn is in flight, wait), `queued` (idle with messages waiting), "
                 "`idle` (open and doing nothing — this is the one that needs a "
-                "decision), `gone` (the crew log remembers the session and the "
-                "dashboard no longer holds it: closed, archived, or lost with the "
-                "process that ran it — re-dispatch it or drop it, there is nothing "
-                "left to message), or `unknown` (birth metadata records that you "
+                "decision), `closed` (the crew log recorded the session ending and "
+                "the dashboard no longer holds it: a worker that FINISHED and "
+                "closed its tab — ignore it, it carries `closed_at`), `lost` (the "
+                "crew log remembers the session, the dashboard no longer holds it, "
+                "and NO close was recorded: lost with the process that ran it — "
+                "re-dispatch it), or `unknown` (birth metadata records that you "
                 "created it, but neither a live session nor an attested crew-log "
                 "edge exists — it was created and its fate is not recorded, so "
-                "read it before you re-dispatch it). `gone` is the reason to use "
-                "this instead of "
+                "read it before you re-dispatch it). `closed` and `lost` are the "
+                "reason to use this instead of "
                 "reading sessions one at a time: a worker that vanished is absent "
-                "from any live list, so a live list cannot tell a worker that died "
-                "from one you never dispatched. Read both quality fields before "
+                "from any live list, so a live list cannot tell a worker that "
+                "finished from one lost mid-task from one you never dispatched. "
+                "Read both quality fields before "
                 "trusting the count: `tree` describes the crew-log roster and "
                 "`history` describes transcript birth metadata. For either one, "
                 "`readable` means that source was read completely, `incomplete` "
@@ -2915,10 +2918,19 @@ def _run_session_status(args: dict[str, Any], ctx: ToolContext) -> str:
     for row in rows:
         target = str(row.get("target", ""))
         status = str(row.get("status", ""))
-        if status == "gone":
+        if status == "closed":
+            closed_at = row.get("closed_at")
+            when = f" at {closed_at}" if closed_at else ""
             status_lines.append(
-                f"  \U0001faa6 `{target}` — gone (the crew log has it, the "
-                "dashboard does not: closed, archived, or lost)"
+                f"  \u2705 `{target}` — closed (finished and closed its tab{when}; "
+                "nothing to re-dispatch)"
+            )
+            continue
+        if status == "lost":
+            status_lines.append(
+                f"  \U0001faa6 `{target}` — lost (the crew log has it, the "
+                "dashboard does not, and no close was recorded: lost with its "
+                "process — re-dispatch it)"
             )
             continue
         title = str(row.get("title", ""))

@@ -3,17 +3,20 @@
 The verb joins two sources that answer different halves, so the tests are grouped
 by what each source contributes and by what happens when one of them is missing.
 
-The LIVE slots supply the status, and the four values are not decoration — a patrol
-waits on `working` and `queued`, decides on `idle`, and re-dispatches or drops
-`gone` — so each one is pinned on its own.
+The LIVE slots supply the status, and the values are not decoration — a patrol
+waits on `working` and `queued`, decides on `idle`, ignores `closed`, and
+re-dispatches `lost` — so each one is pinned on its own.
 
-The CREW LOG supplies the roster, and `gone` is the row only it can produce. A
-worker that was closed, or lost with the process that ran it, is absent from the
-live slots entirely: on a live-only list it is indistinguishable from a worker
-that was never dispatched, and those two states call for opposite actions. So the
-tests below assert not only that a `gone` row appears, but that a caller is TOLD
-when the durable read could not be made — a short list under `unreadable` is not
-evidence that nothing was created.
+The CREW LOG supplies the roster, and `closed`/`lost` are the rows only it can
+produce. A worker that was closed, or lost with the process that ran it, is absent
+from the live slots entirely: on a live-only list it is indistinguishable from a
+worker that was never dispatched, and those states call for opposite actions. The
+two durable fates are themselves told apart by the ``session/closed`` edge — a
+worker that finished and closed its tab reads `closed` (with `closed_at`), one
+gone without a close reads `lost`. So the tests below assert not only that the row
+appears, but that a caller is TOLD which fate it was, and TOLD when the durable
+read could not be made — a short list under `unreadable` is not evidence that
+nothing was created.
 
 The ownership fence applies to the ROWS and not merely to the verb, because the
 rows carry other sessions' titles. That is asserted here rather than left to the
@@ -86,6 +89,32 @@ def _recorded(slot: str, parent: str) -> None:
     proj.apply(OpenedRecord(sid=f"sid-{slot}", slot=slot, created_at=2, parent_slot=parent))
 
 
+def _emitted(slot: str, parent: str, *, closed: bool) -> None:
+    """Write a REAL session log on disk under *parent*, optionally closed.
+
+    Unlike :func:`_recorded`, which only applies the in-memory tree edge, this
+    writes an announced unit through ``emit.on_session_opened`` -- the gateway's own
+    path, which both advances the projection AND leaves a disk log -- so the
+    slot-keyed status fold the `closed`/`lost` split reads has units to fold. A
+    ``session/closed`` edge is appended when *closed*, which is the one fact that
+    separates a worker that finished from one lost with its process.
+    """
+    emit.on_session_opened(
+        f"sid-{parent}", agent="kirocrew", slot=parent, model="m", cwd="/w", owner="o"
+    )
+    emit.on_session_opened(
+        f"sid-{slot}",
+        agent="kirocrew",
+        slot=slot,
+        model="m",
+        cwd="/w",
+        owner="o",
+        parent_slot=parent,
+    )
+    if closed:
+        emit.on_session_closed(f"sid-{slot}", "done")
+
+
 def _busy(slot):
     task = MagicMock()
     task.done.return_value = False
@@ -155,9 +184,13 @@ class TestLiveness:
 
 
 class TestTheDurableRoster:
-    def test_a_session_the_dashboard_no_longer_holds_is_reported_gone(self, tmp_path):
+    def test_a_session_the_dashboard_no_longer_holds_without_a_close_is_lost(self, tmp_path):
         """The row only the durable half can produce, and the reason this verb is
         not a filter over the live slots.
+
+        A tree edge with no recorded ``session/closed`` -- the shape ``_recorded``
+        leaves, and the shape a worker lost with its process leaves -- reads `lost`:
+        the fail-safe reading a patrol re-dispatches.
 
         Mutation guard: drop the crew-log read and a worker that died vanishes from
         the list entirely, where it is indistinguishable from one that was never
@@ -165,16 +198,42 @@ class TestTheDurableRoster:
         """
         state = _make_state(tmp_path)
         caller = _slot(state, "chat-1")
-        _recorded("chat-7", caller.key)  # opened, and since closed or lost
+        _recorded("chat-7", caller.key)  # opened, and since lost with its process
         out = _status(state, caller)
         assert out["tree"] == "readable"
         assert _rows(out)["chat-7"] == {
             "target": "chat-7",
-            "status": "gone",
+            "status": "lost",
             "source": "crew_log",
         }
 
-    def test_a_gone_row_carries_no_title(self, tmp_path):
+    def test_a_worker_that_closed_its_tab_is_reported_closed_with_its_stamp(self, tmp_path):
+        """The distinction this verb exists for: a worker that FINISHED and closed
+        its tab wrote a ``session/closed`` edge, so its gone row reads `closed` and
+        carries ``closed_at`` — a conductor ignores it instead of re-dispatching.
+        """
+        state = _make_state(tmp_path)
+        caller = _slot(state, "chat-1")
+        _emitted("chat-7", caller.key, closed=True)
+        out = _status(state, caller)
+        assert out["tree"] == "readable"
+        row = _rows(out)["chat-7"]
+        assert row["target"] == "chat-7"
+        assert row["status"] == "closed"
+        assert row["source"] == "crew_log"
+        assert row["closed_at"] is not None
+
+    def test_a_worker_gone_with_a_live_log_but_no_close_is_lost(self, tmp_path):
+        """A real on-disk log that never recorded a close is `lost`, not `closed`:
+        the opposite action from the one above, read from the same edge."""
+        state = _make_state(tmp_path)
+        caller = _slot(state, "chat-1")
+        _emitted("chat-7", caller.key, closed=False)
+        row = _rows(_status(state, caller))["chat-7"]
+        assert row["status"] == "lost"
+        assert "closed_at" not in row
+
+    def test_a_closed_or_lost_row_carries_no_title(self, tmp_path):
         """There is no slot to read one from, and a title recovered from anywhere
         else would be a claim about a session nobody is holding."""
         state = _make_state(tmp_path)
@@ -295,7 +354,7 @@ class TestTheDurableReadsQuality:
         """An incomplete fold is the one case the projection's own contract says a
         DISPLAYING reader may use: a missing row renders as an absent session, which
         is what a live-only list looked like before this verb existed. Discarding it
-        would throw away every `gone` row over one unreadable unit.
+        would throw away every durable (`closed`/`lost`) row over one unreadable unit.
         """
         from kiro_crew.crew_log.session_tree import TreeReading
 

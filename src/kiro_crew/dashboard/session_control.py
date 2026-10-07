@@ -44,7 +44,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -7591,6 +7591,51 @@ def _created_tree_roster(caller_key: str) -> "tuple[list[str], str]":
     return children, ("incomplete" if reading.incomplete or overflow else "readable")
 
 
+def _gone_slot_lifecycles(slots: "Sequence[str]") -> dict[str, dict[str, Any]]:
+    """Fold each gone slot's lifecycle so a `gone` row can say CLOSED versus LOST.
+
+    The crew log already records a ``session/closed`` edge and the status fold
+    already projects it as ``lifecycle``/``closed_at`` (see
+    :func:`~kiro_crew.crew_log.projection._status_render`). This reads that
+    projection per slot and nothing more -- no new terminal vocabulary, no new
+    verb -- so a worker whose tab was closed after it finished is told apart from
+    one lost with its process.
+
+    The read is slot-keyed (:func:`~kiro_crew.crew_log.projection.read_slot_projection`),
+    so it folds over EVERY unit the slot ran under, newest last, and reports the
+    lifecycle of the slot's current session. A slot that was reopened and later
+    closed again reads ``closed``; the ``session/opened`` of the reopen resets the
+    close the earlier life recorded, which the status fold already handles.
+
+    Returns a map ``{slot: {"status", "closed_at"?}}``. A slot whose fold reports
+    ``lifecycle == "closed"`` is ``closed`` and carries its ``closed_at``; anything
+    else -- ``open`` (gone from the dashboard but the log never recorded a close),
+    ``unknown`` (the opener was retained out of the log), or a read that raised --
+    is ``lost``. "Lost" is the fail-safe reading: it is the state a patrol
+    re-dispatches, and reporting a worker lost when it may have finished is cheaper
+    than dropping one that was.
+
+    Touches disk (one slot-keyed fold per slot), so it is called off the event loop.
+    """
+    from kiro_crew.crew_log.projection import read_slot_projection
+
+    out: dict[str, dict[str, Any]] = {}
+    for slot in slots:
+        try:
+            value = read_slot_projection(slot, "status").value
+        except Exception:
+            # A read fault is not evidence the worker closed cleanly, so it reads as
+            # LOST -- the fail-safe answer, the one a patrol acts on by re-dispatching.
+            logger.debug("gone row lifecycle could not be folded for %s", slot, exc_info=True)
+            out[slot] = {"status": "lost"}
+            continue
+        if value.get("lifecycle") == "closed":
+            out[slot] = {"status": "closed", "closed_at": value.get("closed_at")}
+        else:
+            out[slot] = {"status": "lost"}
+    return out
+
+
 def _bounded_status_title(value: object) -> str:
     """A display-safe title bounded before it is retained in a status row."""
     return sanitize_outbound(str(value or ""))[:MAX_SESSION_STATUS_TITLE_CHARS]
@@ -7677,10 +7722,15 @@ async def created_session_status(
     * ``queued`` — idle, but messages are waiting to run. Also wait, but nothing is
       happening yet, so a steer would land on nothing.
     * ``idle`` — open and doing nothing. This is the one that needs a decision.
-    * ``gone`` — the crew log names it and the dashboard does not hold it: closed,
-      archived, or lost with the process that ran it. Re-dispatch or drop it; there
-      is nothing here to message, and :func:`authorize_target` would answer
-      ``target_not_found``.
+    * ``closed`` — the crew log names it, the dashboard does not hold it, and the
+      log records a ``session/closed`` edge: a worker that FINISHED and closed its
+      tab. Carries ``closed_at``. Ignore it; there is nothing here to message, and
+      :func:`authorize_target` would answer ``target_not_found``.
+    * ``lost`` — the crew log names it, the dashboard does not hold it, and NO close
+      edge was recorded: lost with the process that ran it (or its opener was
+      retained out of the log). Re-dispatch it. ``closed`` and ``lost`` are the two
+      fates the old single ``gone`` status could not tell apart, and they call for
+      opposite actions.
     * ``unknown`` — history records the creator but neither a live slot nor an
       attested tree edge exists. The row proves the session was created without
       claiming whether it finished or was lost.
@@ -7699,8 +7749,8 @@ async def created_session_status(
     The ownership fence applies to the rows, not just to the verb: a fenced caller
     (a crew member, a cron, an agent-created session) sees the live sessions it
     created and nothing else, so this verb cannot become a way to enumerate the
-    user's own sessions by their titles. A ``gone`` row carries only a slot key the
-    caller already knew, and no title, so it is listed either way.
+    user's own sessions by their titles. A ``closed`` or ``lost`` row carries only
+    a slot key the caller already knew, and no title, so it is listed either way.
     """
     deny = _deny_factory(caller_session_key=caller_session_key, operation="status", target="")
     caller_key = refuse_caller_identity(state, caller_session_key=caller_session_key, deny=deny)
@@ -7777,7 +7827,20 @@ async def created_session_status(
     # Zero when nothing was cut, so a reader distinguishes "no overflow" from a
     # cut whose size it must know to judge the roster it was handed.
     roster_omitted = max(0, len(roster) - MAX_SESSION_STATUS_ROWS)
-    for key in sorted(roster)[:MAX_SESSION_STATUS_ROWS]:
+    retained = sorted(roster)[:MAX_SESSION_STATUS_ROWS]
+    # A `gone` row -- the tree names it and the dashboard does not hold it -- splits
+    # into `closed` and `lost`, and the two call for OPPOSITE actions: ignore a
+    # worker that finished and closed its tab, re-dispatch one lost with its
+    # process. The split is read from the ``session/closed`` edge the status fold
+    # already projects, so it is a disk fold per gone slot and runs OFF the loop,
+    # the same worker-thread discipline the history scan above keeps. Scoped to the
+    # retained, tree-attested, now-absent slots so no fold is paid for a row that
+    # will not carry the distinction.
+    gone_slots = [key for key in retained if key in tree_children and state.get_slot(key) is None]
+    gone_lifecycles = (
+        await asyncio.to_thread(_gone_slot_lifecycles, gone_slots) if gone_slots else {}
+    )
+    for key in retained:
         slot = state.get_slot(key)
         from_tree = key in tree_children
         from_history = key in history_children
@@ -7794,7 +7857,23 @@ async def created_session_status(
             if from_tree:
                 # The attested tree still owns this status. History may corroborate
                 # the birth, but it does not turn editable metadata into lineage.
-                rows.append({"target": key, "status": "gone", "source": "+".join(sources)})
+                #
+                # CLOSED vs LOST, read from the ``session/closed`` edge the status
+                # fold projects: a worker that closed its tab after finishing is
+                # ``closed`` and carries its ``closed_at``; one gone without a
+                # recorded close -- lost with its process, or whose opener was
+                # retained out of the log -- is ``lost``. Defaults to ``lost`` when
+                # the fold was not made (a slot absent from the map), the fail-safe
+                # reading a patrol re-dispatches rather than drops.
+                lifecycle = gone_lifecycles.get(key, {"status": "lost"})
+                gone_row: dict[str, Any] = {
+                    "target": key,
+                    "status": lifecycle["status"],
+                    "source": "+".join(sources),
+                }
+                if lifecycle["status"] == "closed":
+                    gone_row["closed_at"] = lifecycle.get("closed_at")
+                rows.append(gone_row)
                 continue
             meta = history_children[key]
             rows.append(
