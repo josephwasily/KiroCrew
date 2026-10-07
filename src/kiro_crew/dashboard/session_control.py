@@ -7799,20 +7799,10 @@ async def created_session_status(
 
     # Live slot state stays on the event loop and is read only after the history
     # worker returns. Reading it inside the worker would let the result go stale
-    # before these rows are built.
+    # before these rows are built. This read only names the caller's own creations
+    # (`_created_by`, not workspace), so it is not the workspace-boundary read --
+    # that is `resolvable_keys`, built below AFTER the last suspension in this verb.
     live_children = broadcast_audience(state, caller_key)
-    # The SAME containment set `session_broadcast` resolves names against, resolved
-    # here once and applied to every live row below. Read after the re-check above,
-    # so a mirror bound during the scan is already reflected in it.
-    resolvable_keys = {
-        slot.key
-        for slot in _broadcast_resolution_slots(
-            state,
-            caller_key=caller_key,
-            caller_slot=caller_slot,
-            ownership_fenced=ownership_fenced,
-        )
-    }
 
     rows: list[dict[str, Any]] = []
     roster = set(tree_children) | set(history_children) | set(live_children)
@@ -7840,6 +7830,37 @@ async def created_session_status(
     gone_lifecycles = (
         await asyncio.to_thread(_gone_slot_lifecycles, gone_slots) if gone_slots else {}
     )
+    # The gone fold above is the LAST suspension in this verb, and the live-row
+    # containment must be computed after it, not before. A live worker can be moved
+    # across the workspace boundary mid-fold -- `api_chat_slot_workspace` reassigns
+    # `_slot.workspace` on a running slot with no idle requirement -- so a
+    # `resolvable_keys` built before this await would admit a worker on its
+    # pre-move workspace and then carry its `display_title` out of the caller's
+    # workspace in the row loop below. So re-call the caller gate on the same terms
+    # and REBUILD containment here, after the final await, exactly as the block
+    # after the history scan does: the boundary every row is filtered on is read
+    # from the live slots as they stand once nothing else can suspend.
+    refuse_caller_surface(state, caller_key=caller_key, deny=deny)
+    if str(getattr(caller_slot, "workspace", "default")) != caller_workspace:
+        raise deny(
+            "the calling session moved workspace while its roster was being read; " "call again",
+            "caller_changed_mid_read",
+        )
+    # The SAME containment set `session_broadcast` resolves names against, resolved
+    # here once and applied to every live row below. Built AFTER the gone fold's
+    # await (and its re-check), so a worker moved across the boundary during that
+    # fold is already excluded -- its `workspace` is re-read here as it now stands,
+    # and the fail-safe follows: a row the moved worker would carry is dropped by
+    # the `resolvable_keys` membership test below rather than leaked.
+    resolvable_keys = {
+        slot.key
+        for slot in _broadcast_resolution_slots(
+            state,
+            caller_key=caller_key,
+            caller_slot=caller_slot,
+            ownership_fenced=ownership_fenced,
+        )
+    }
     for key in retained:
         slot = state.get_slot(key)
         from_tree = key in tree_children

@@ -828,7 +828,16 @@ class TestTheCallerSurfaceIsRecheckedAfterTheScan:
     scan that suspends. A channel mirror can be bound onto an already-open
     dashboard session while that scan is on its worker thread, from the channel
     picker and from the Slack link route, neither of which requires an idle slot.
-    Without a re-check the reply is published past a gate that passed."""
+    Without a re-check the reply is published past a gate that passed.
+
+    The gone-row lifecycle fold is a SECOND suspension, later still, and the
+    workspace-boundary containment every live row is filtered on is built after
+    it -- so a worker moved across the boundary during that fold is excluded by a
+    containment read as the slots now stand, not admitted on its pre-move
+    workspace. The last two tests pin that: the fold is monkeypatched to move a
+    slot mid-await, the window the synchronous gate and the first re-check both
+    predate.
+    """
 
     def test_a_mirror_bound_during_the_scan_refuses_instead_of_replying(
         self, tmp_path, monkeypatch
@@ -885,6 +894,63 @@ class TestTheCallerSurfaceIsRecheckedAfterTheScan:
             return out
 
         monkeypatch.setattr(sc, "_created_history_roster", _scan_then_move)
+
+        with pytest.raises(sc.SessionControlError) as excinfo:
+            _status(state, caller)
+
+        assert excinfo.value.code == "caller_changed_mid_read"
+
+    def test_a_worker_moved_across_the_boundary_during_the_gone_fold_is_not_leaked(
+        self, tmp_path, monkeypatch
+    ):
+        """A live worker in the caller's workspace carries a title the caller may
+        read -- until it switches workspace, which `api_chat_slot_workspace` does on
+        a running slot with no idle requirement. If that move lands during the
+        gone-row lifecycle fold (the verb's last suspension), a containment set
+        built before the fold would still admit the worker and carry its title out
+        of the caller's workspace. The row must be dropped: containment is rebuilt
+        after the fold, so the moved worker falls outside the resolvable set."""
+        state = _make_state(tmp_path)
+        caller = _slot(state, "chat-1")
+        worker = _child(state, "chat-2", caller)
+        worker.title = "acquisition terms Q4"
+        # A tree-attested, now-absent slot so `gone_slots` is non-empty and the
+        # lifecycle fold -- the guarded suspension -- actually runs.
+        _recorded("chat-9", caller.key)
+        real_fold = sc._gone_slot_lifecycles
+
+        def _fold_then_move(slots):
+            out = real_fold(slots)
+            worker.workspace = "other"
+            return out
+
+        monkeypatch.setattr(sc, "_gone_slot_lifecycles", _fold_then_move)
+
+        rows = _rows(_status(state, caller))
+
+        assert "chat-2" not in rows
+        assert worker.title not in str(rows)
+        # The gone row the fold was folding is unaffected -- it carries no title.
+        assert rows["chat-9"]["status"] == "lost"
+
+    def test_the_caller_moving_during_the_gone_fold_refuses(self, tmp_path, monkeypatch):
+        """The symmetric guard for the SAME suspension: the caller's own workspace
+        is the boundary every live row is filtered on, and a move of it during the
+        gone fold must refuse rather than filter rows against a boundary the fold
+        did not use -- the re-check after the fold fires, not only the one after
+        the history scan."""
+        state = _make_state(tmp_path)
+        caller = _slot(state, "chat-1")
+        _child(state, "chat-2", caller)
+        _recorded("chat-9", caller.key)
+        real_fold = sc._gone_slot_lifecycles
+
+        def _fold_then_move(slots):
+            out = real_fold(slots)
+            caller.workspace = "somewhere-else"
+            return out
+
+        monkeypatch.setattr(sc, "_gone_slot_lifecycles", _fold_then_move)
 
         with pytest.raises(sc.SessionControlError) as excinfo:
             _status(state, caller)
