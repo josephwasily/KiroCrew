@@ -8255,6 +8255,10 @@ async def _run_chat(
     # makes every emitter call a no-op.
     _crew_log_sid = ""
     _turn_msg_boundary = 0
+    # True once dispatch has captured this turn's message boundary. Before it,
+    # the boundary still reads 0 and would scope a footer write to the WHOLE
+    # window, so the stopped-turn footer is gated on it.
+    _turn_boundary_set = False
     # Identity of the window's tail row when the turn began ("" for an empty
     # window), so the file-change flush can find this turn's rows after a
     # front-trim moved every index. Re-captured at dispatch with the boundary.
@@ -8628,11 +8632,13 @@ async def _run_chat(
         # accumulated multi-attempt total, so a second read for the footer would
         # see only the last attempt. The row and the footer share this value.
         _usage = provider_last_turn_usage(client, since=_turn_stats0)
-        if reason == STOP_REASON_CANCELLED:
+        if reason == STOP_REASON_CANCELLED and _turn_boundary_set:
             # A Stop press is the one abnormal end the user caused on purpose,
             # and the partial reply it leaves is a reply they read: give it the
-            # same footer a completed turn gets (#11523), so what the stopped
-            # turn cost is visible where the turn ended.
+            # same footer a completed turn gets, so what the stopped turn cost
+            # is visible where the turn ended. A Stop before dispatch has no
+            # boundary yet, and attaching then would overwrite the previous
+            # turn's footer, so it writes only the usage row.
             _attach_stopped_turn_stats(_usage, _elapsed_ms)
         if await _persist_abnormal_turn_usage(
             slot,
@@ -8652,8 +8658,9 @@ async def _run_chat(
         (``_attach_turn_stats`` -> ``turn_stats_meta``), so the footer renders
         exactly what it renders for a finished turn: elapsed always, credits or
         cost only when the provider reported a non-zero figure. Scoped to this
-        turn's rows by ``_turn_msg_boundary``; a turn stopped before it wrote any
-        reply row gets no footer, because there is no row to carry one.
+        turn's rows by ``_turn_msg_boundary``, which the caller only trusts once
+        dispatch has set it; a turn stopped before it wrote any reply row gets no
+        footer, because there is no row to carry one.
 
         The row is mutated in place; it reaches disk because the turn's
         ``finally`` runs ``_flush_file_changes``, which marks the slot dirty on
@@ -11461,6 +11468,7 @@ async def _run_chat(
         _turn_cost_usd = 0.0
         _turn_model = ""
         _turn_msg_boundary = len(slot.messages)
+        _turn_boundary_set = True
         _turn_start_mid = row_mid(slot.messages[-1]) if slot.messages else ""
         # The crew log ordinal is the ABSOLUTE durable position, not the window
         # length. `slot.messages` is front-trimmed at `_MAX_SLOT_MESSAGES`, so past

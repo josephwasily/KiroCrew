@@ -454,14 +454,29 @@ class TestCancelDuringCompletePersist:
         assert client.last_prompt_stats is prior
 
 
+async def _let_the_turn_clock_advance() -> None:
+    """Wait until the turn's monotonic clock has moved a few milliseconds.
+
+    A turn the fake stream ends in under a millisecond measures 0 ms, which
+    ``turn_stats_meta`` reads as nothing to show, so the footer assertions wait
+    on the clock they depend on rather than sleeping a fixed amount.
+    """
+    import time
+
+    from kiro_crew.testing.wait import async_wait_until
+
+    start = time.monotonic()
+    await async_wait_until(lambda: time.monotonic() - start >= 0.005)
+
+
 class TestStoppedTurnFooter:
-    """#11523: a Stop press gives the partial reply the completed-turn footer.
+    """A Stop press gives the partial reply the completed-turn footer.
 
     A completed turn's last reply row carries ``meta.turn_stats`` (elapsed,
     credits/cost, model) and the dashboard renders it as the usage line under
-    the reply. A Stop ends the turn through the CancelledError arm instead, so
-    before #11523 the partial reply had no footer and the stopped turn's spend
-    was only in the usage row. These drive the real ``_run_chat`` with the REAL
+    the reply. A Stop ends the turn through the CancelledError arm instead,
+    which never reaches EVENT_COMPLETE, so the abnormal-end seam is what writes
+    the stopped reply's footer. These drive the real ``_run_chat`` with the REAL
     ``provider_last_turn_usage`` and assert the footer on the partial row, and
     that the footer and the usage row come from the same single billing read.
     """
@@ -480,9 +495,7 @@ class TestStoppedTurnFooter:
                 # the same total.
                 setattr(client, llm_helpers._TURN_BILLED_ATTR, (stats, accumulated))
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial answer")
-            # A real turn takes time; a sub-millisecond one measures 0 ms, which
-            # turn_stats_meta reads as nothing to show.
-            await asyncio.sleep(0.02)
+            await _let_the_turn_clock_advance()
             # The dashboard Stop handler marks the slot, then the turn's task
             # is cancelled -- the shape _stop_pressed() reads.
             slot._stopping = True
@@ -560,8 +573,7 @@ class TestStoppedTurnFooter:
         async def _stream(msg):
             client.last_prompt_stats = _RealStats(credits=2.0)
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial answer")
-            # Same duration as the Stop case, so only the Stop press differs.
-            await asyncio.sleep(0.02)
+            await _let_the_turn_clock_advance()
             raise asyncio.CancelledError()
 
         client.stream = _stream
@@ -573,3 +585,33 @@ class TestStoppedTurnFooter:
         rows = _rows(tmp_path)
         assert len(rows) == 1
         assert rows[0]["credits"] == pytest.approx(2.0)
+
+    @pytest.mark.asyncio
+    async def test_a_stop_before_dispatch_leaves_the_previous_footer_alone(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # A Stop landing during pre-prompt preparation (after the client is
+        # published, before dispatch captures the turn's message boundary)
+        # must not attach anything: with the boundary still 0 the attach would
+        # walk back to the PREVIOUS reply and overwrite its recorded footer.
+        monkeypatch.setattr(usage_mod, "_TOKEN_USAGE_DIR", tmp_path)
+        monkeypatch.setattr(chat_runner, "read_turn_model", lambda c: "served-model")
+        state, slot, client = _drive_state_and_slot(tmp_path, name="pre-dispatch-stop-slot")
+        prior_stats = {"elapsed_ms": 5000, "credits": 9.0}
+        slot.append(
+            "assistant", "previous reply", "msg msg-a", meta={"turn_stats": dict(prior_stats)}
+        )
+        slot.append("user", "next question", "msg msg-u")
+        client.last_prompt_stats = _RealStats(credits=0.0)
+
+        async def _stop_during_preparation(*args, **kwargs):
+            await _let_the_turn_clock_advance()
+            slot._stopping = True
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(chat_runner, "publish_turn_identity", _stop_during_preparation)
+
+        await _run_chat(state, slot, "next question")
+
+        previous = next(m for m in slot.messages if m.get("content") == "previous reply")
+        assert previous["meta"]["turn_stats"] == prior_stats
