@@ -7550,18 +7550,13 @@ class TestEnvDumpGrepAwsNarrowing:
     def test_a_markdown_tool_body_passes_the_command_rules(self) -> None:
         from kiro_crew.llm_helpers import _first_tool_input_denial
 
-        assert (
-            _first_tool_input_denial([self.MARKDOWN_TOOL_BODY], None, command_rules=True)
-            is None
-        )
+        assert _first_tool_input_denial([self.MARKDOWN_TOOL_BODY], None, command_rules=True) is None
 
     def test_a_dump_in_a_tool_argument_is_still_refused(self) -> None:
         from kiro_crew.llm_helpers import _first_tool_input_denial
         from kiro_crew.security import _ENV_CRED_DENIAL_REASON
 
-        denial = _first_tool_input_denial(
-            ["env | egrep AWS_SECRET"], None, command_rules=True
-        )
+        denial = _first_tool_input_denial(["env | egrep AWS_SECRET"], None, command_rules=True)
         assert denial is not None
         assert _ENV_CRED_DENIAL_REASON in denial
 
