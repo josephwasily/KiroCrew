@@ -963,14 +963,23 @@ function withJournaledDeadline<T>(
       const alreadyPinned = typeof error === 'object' && error !== null
         && 'errorReport' in (error as Record<string, unknown>)
       if (!alreadyPinned) {
-        const report = recordError({
-          source: 'api',
+        // Route through `recordTransportRejection`, NOT `recordError`: a timeout
+        // whose `jfetch` entry the burst cap already suppressed arrives here with
+        // no pin (the suppressed call attached nothing), and `recordError` would
+        // skip the cap and re-add the very entry the cap dropped. The cap keys on
+        // `method + endpoint`; the method the inner `jfetch` saw is lost by here,
+        // so this re-record keys on the endpoint under the default GET bucket —
+        // which is the same bucket `jfetch` used for the suppressed GET it is
+        // standing in for, so the suppression carries through. A still-live key
+        // hands back its stored report; only a genuinely unrecorded deadline
+        // (an attempt that never went through `jfetch`) adds a fresh entry.
+        const report = recordTransportRejection({
           message: error instanceof Error ? error.message : String(error),
           code: 'timeout',
           endpoint,
         })
         // `isDeadlineError` has already established this is a non-null object.
-        attachReport(error as object, report)
+        if (report) attachReport(error as object, report)
       }
     }
     throw error
