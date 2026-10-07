@@ -378,14 +378,21 @@ def _atomic_json_write(path: Path, data: dict) -> None:
 
     Uses mkstemp for a unique temp file per call so concurrent writers
     to the same path don't clobber each other's temp files.
+
+    The result is owner-only on POSIX (``0o600`` for a new file; an existing
+    file keeps its owner bits and loses every group/other bit). An agent spec
+    is where the vault's secrets are projected for kiro-cli -- a pre-registered
+    ``oauth.clientSecret``, remote ``headers`` credentials -- and kiro-cli runs
+    as the same user, so no reader needs more. On Windows
+    ``fchmod_safe`` is a no-op and the file inherits the directory's ACL.
     """
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             try:
-                mode = stat.S_IMODE(path.stat().st_mode)
+                mode = stat.S_IMODE(path.stat().st_mode) & 0o700
             except FileNotFoundError:
-                mode = 0o644
+                mode = 0o600
             platform_compat.fchmod_safe(f.fileno(), mode)
             json.dump(data, f, indent=2)
             f.write("\n")
