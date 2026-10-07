@@ -5695,6 +5695,9 @@
     "kiroAccountModal": {
       "account_details_unavailable": "Kontodetails sind nicht verfügbar",
       "balance_checked_at": "Geprüft um {{time}}",
+      "forecast_lasts": "Beim Tempo dieses Zyklus sollten deine Credits bis zum Zurücksetzen reichen.",
+      "forecast_runs_out": "Beim Tempo dieses Zyklus sind deine Credits etwa am {{date}} aufgebraucht, vor dem Zurücksetzen.",
+      "forecast_unavailable": "Die letzte Nutzung konnte nicht geladen werden, daher kann das Datum nicht angezeigt werden.",
       "balance_may_be_stale": "Es wird ein früherer Wert angezeigt; die letzte Aktualisierung hat keinen geliefert.",
       "checking_account": "Konto wird geprüft…",
       "checking_credit_usage": "Credit-Nutzung wird geprüft",

@@ -5786,6 +5786,9 @@
     "kiroAccountModal": {
       "account_details_unavailable": "Les détails du compte ne sont pas disponibles",
       "balance_checked_at": "Vérifié à {{time}}",
+      "forecast_lasts": "Au rythme de ce cycle, tes crédits devraient tenir jusqu’à la réinitialisation.",
+      "forecast_runs_out": "Au rythme de ce cycle, tu seras à court de crédits vers le {{date}}, avant la réinitialisation.",
+      "forecast_unavailable": "Impossible de charger l’utilisation récente, la date d’épuisement ne peut donc pas s’afficher.",
       "balance_may_be_stale": "Une valeur plus ancienne est affichée ; la dernière actualisation n’en a renvoyé aucune.",
       "checking_account": "Vérification du compte…",
       "checking_credit_usage": "Vérification de l’utilisation des crédits",

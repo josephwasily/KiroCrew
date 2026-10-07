@@ -5879,6 +5879,9 @@
     "kiroAccountModal": {
       "account_details_unavailable": "アカウント詳細を取得できません",
       "balance_checked_at": "{{time}} に確認",
+      "forecast_lasts": "今サイクルのペースなら、クレジットはリセットまで持つ見込みです。",
+      "forecast_runs_out": "今サイクルのペースだと、リセット前の {{date}} ごろにクレジットを使い切る見込みです。",
+      "forecast_unavailable": "最近の使用量を読み込めなかったため、使い切る日を表示できません。",
       "balance_may_be_stale": "以前の値を表示しています。最新の更新では値が返されませんでした。",
       "checking_account": "アカウントを確認中…",
       "checking_credit_usage": "クレジット使用量を確認中",

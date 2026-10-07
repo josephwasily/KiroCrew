@@ -5604,6 +5604,9 @@
     "kiroAccountModal": {
       "account_details_unavailable": "账户详情暂不可用",
       "balance_checked_at": "检查时间 {{time}}",
+      "forecast_lasts": "按本周期的用量，额度应该能撑到重置。",
+      "forecast_runs_out": "按本周期的用量，大约会在 {{date}} 用完，早于重置日。",
+      "forecast_unavailable": "无法加载近期用量，因此无法显示用完日期。",
       "balance_may_be_stale": "显示的是较早的读数；最近一次刷新没有返回新读数。",
       "checking_account": "正在检查账户…",
       "checking_credit_usage": "正在检查额度用量",

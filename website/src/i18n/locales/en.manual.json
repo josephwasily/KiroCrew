@@ -1772,6 +1772,9 @@
     "kiroAccountModal": {
       "account_details_unavailable": "Account details unavailable",
       "balance_checked_at": "Checked at {{time}}",
+      "forecast_lasts": "At this cycle's pace, your credits should last until the reset.",
+      "forecast_runs_out": "At this cycle's pace, you'll run out around {{date}}, before the reset.",
+      "forecast_unavailable": "Could not load recent usage, so the run-out date can't be shown.",
       "balance_may_be_stale": "Showing an earlier reading; the latest refresh did not return one.",
       "checking_account": "Checking account…",
       "checking_credit_usage": "Checking credit usage",

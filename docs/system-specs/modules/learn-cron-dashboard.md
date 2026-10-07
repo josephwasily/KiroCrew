@@ -110,6 +110,21 @@ non-kiro harness never shows a permanent all-zero card. Zero totals with a
 non-zero `unreadable_sessions` keep the card for its warning, and a day with a
 non-zero `est_tokens` shows both the card and the column.
 
+The Kiro Account modal's run-out line (`website/src/api/creditForecast.ts`) reads
+these same `daily_history` credits through the shared `providerUsageQuery`, and
+takes from them only the SHAPE of a week, never the pace: these rows count turns
+this gateway ran, so another client on the same account is invisible to them. The
+pace is the account's `credits_used` over the days since the cycle started (one
+calendar month before `resets`, clamped to the month's last day). Each remaining
+day is weighted by its weekday's share of the last 28 days of history. Weights stay
+flat until 14 days of history exist, days before the first row are unknown rather
+than zero, and only the rest of today counts. The line says the plan lasts, or names
+the day it runs out in the warn tone. It is omitted when no reset date parses, the
+plan is already used up, a bonus grant still holds credits (the plan counter barely
+moves while bonus drains, so its pace reads near zero), less than a day of the cycle
+has run, or the report is loading or still `refreshing`. A failed read renders an
+`ErrorNotice` with the hand-off instead.
+
 The Overview usage summary and Usage report share a per-provider browser-memory
 cache for the dashboard lifetime. Opening either view shows the last successful
 report immediately. Data is fresh for five minutes; an older report refreshes
