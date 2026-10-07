@@ -2780,11 +2780,12 @@ async def handle_message(
                 # clobbering ``_answer_reached`` to False there would book an
                 # ordinary reasoning/tool-only turn a failure. Only apply the
                 # wholly-refused-stream predicate when there WAS answer text.
-                if _answer_text_to_send:
-                    _answer_reached = answer.delivered
+                # Read after the seal: it sends the last held run of text.
                 await answer.seal(
                     clean_text, redacted=bool(_render_redacted or exfil_warnings or cred_warnings)
                 )
+                if _answer_text_to_send:
+                    _answer_reached = answer.delivered
             elif answer.stream_ts:
                 # Legacy fallback (chat.startStream unavailable): the "Thinking…"
                 # placeholder is replaced with the clean text. Answer-carrying —

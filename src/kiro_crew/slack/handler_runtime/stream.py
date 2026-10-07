@@ -261,9 +261,9 @@ class _AnswerStream:
         self.debt = False
         # Rolling-buffer redactor for the live Slack wire: withholds the trailing
         # credential-class run so a credential split across streaming chunks can't
-        # reach Slack unredacted (issue 3). The final message is posted from the
-        # complete, fully-redacted `accumulated`, so the held tail is superseded at
-        # stop_stream — no data loss.
+        # reach Slack unredacted (issue 3). The held tail is settled at every point a
+        # message ends (``settle_tail``): sent when that message's text is clean,
+        # dropped when it is not, so it never vanishes and never reaches the next one.
         self.redactor = StreamRedactor()
         self.accumulated = ""
         self.thinking_accumulated = ""
@@ -326,9 +326,8 @@ class _AnswerStream:
         Streams through the rolling redactor (``redactor``) so a credential split
         across streaming chunks can't reach Slack unredacted (issue 3): only the
         confirmed-safe prefix is sent now; the trailing (possible-partial-
-        credential) run is withheld until the next append. The final message is
-        posted from the complete, fully-redacted ``accumulated`` at stop_stream,
-        so the withheld tail is superseded — never lost.
+        credential) run is withheld until the next append, or until
+        ``settle_tail`` decides it when the message ends.
         """
         if not self.stream_ts:
             return True
@@ -337,6 +336,36 @@ class _AnswerStream:
         safe = self.redactor.feed(text)  # redacts the confirmed-safe prefix internally
         if not safe:
             return True  # whole delta withheld (partial credential) — nothing to send yet
+        return await self._deliver(safe)
+
+    def segment_redacted(self) -> bool:
+        """Whether the whole text of this message redacts differently than its chunks did.
+
+        Each chunk is redacted on its own as it arrives, so a value that only forms
+        across chunks is caught here, on the joined text, and nowhere earlier.
+        """
+        return redact(self.accumulated) != self.accumulated
+
+    async def settle_tail(self, *, redacted: bool) -> None:
+        """Send or drop what the redactor still holds, because the message ends here.
+
+        The redactor withholds the last run of every chunk until more text shows it
+        is safe. When the message ends that text never comes, so decide now. When
+        the message text is clean, send the held run so the last word is not lost.
+        When it is not, drop the run: the caller replaces the visible copy, or the
+        message is being abandoned. Either way nothing is left to reach the next one.
+        """
+        if redacted:
+            self.redactor.reset()
+            return
+        tail = self.redactor.flush()
+        if not tail or not self.stream_ts or self.channel_activation == ACTIVATION_REVIEW:
+            return
+        await self._deliver(tail)
+
+    async def _deliver(self, safe: str) -> bool:
+        """Put already-redacted text on the stream, rotating once on a refusal."""
+        assert self.stream_ts is not None
         if "[REDACTED" in safe:
             self.had_redaction = True
         # Best-effort: MUST NOT raise. A raising append is the same event as a refused
@@ -675,6 +704,7 @@ class _AnswerStream:
         if self.use_slack_stream:
             # Flush any buffered text before the tool status
             await self.flush()
+            await self.settle_tail(redacted=self.segment_redacted())
             # Mark previous task complete, start new one
             if self.active_task_id:
                 _elapsed = self.tool_elapsed_str()
@@ -738,6 +768,7 @@ class _AnswerStream:
             )
             if _released:
                 await self.append(_released)
+            await self.settle_tail(redacted=self.segment_redacted())
             # Last chance to tell the reader: the seal below drops
             # ``stream_ts`` and ``accumulated``, so a turn that ends with
             # no post-wait text opens no further stream and reaches no
@@ -812,6 +843,9 @@ class _AnswerStream:
         nothing to notice.
         """
         assert self.stream_ts is not None
+        # The overwrite below carries the whole text when it runs, so the held
+        # tail is only sent when it will not.
+        await self.settle_tail(redacted=self.had_redaction or redacted)
         if self.debt:
             await self.settle_debt(self.stream_ts)
         # The seal is decoration: the answer is already on screen, so a
