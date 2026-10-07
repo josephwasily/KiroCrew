@@ -147,7 +147,14 @@ again, because two reads of one file can disagree: the staleness test could see 
 corrected path and reopen while a second read returned the empty string and sent
 discovery to the INFERRED tiers. That latch passes the marker test, so it is VALID and
 therefore final, nothing re-resolves it and only a restart clears it. A partial read
-publishes nothing at all and the next poll retries against a settled file. Every
+publishes no resolution and the next poll retries against a settled file, but it does NOT
+leave the operator looking for a checkout that was never the problem: the attempt recovers,
+from the same checked read, the name of each config file that could not be read or parsed,
+and sets `_REPO_CFG_UNREADABLE_MSG` to a neutral sentence naming it (`config.local.json is
+present but could not be read or parsed`). `_repo()` raises `RepoUnreadable` with that
+message ahead of the missing-checkout gate, so `/fleet` shows the Discovery Error banner
+pointing at a file the operator can fix rather than the setup card. A later whole read clears
+the message, so a corrected file stops the banner on the next poll. Every
 global the chain writes is a function of the current attempt alone, including the
 invalid-path message, which an attempt that finds nothing clears rather than inherits —
 `MAIN_REPO` from one attempt beside an earlier attempt's verdict would hand `_repo()` a path
@@ -159,7 +166,10 @@ while nothing fetches (`test/test_dev_fleet_repo_reresolution.py`).
 Because `""` would make `git -C ""` operate on the backend's own working directory (and
 `Path("")` is `Path(".")`), no consumer reads the global directly: every site that runs git
 against the checkout or builds paths from it resolves it through the `_repo()` accessor,
-which returns the path or raises `RepoNotConfigured`. Sites that deliberately degrade
+which returns the path or raises `RepoUnreadable` (a present config file would not read or
+parse, checked first so an empty `MAIN_REPO` is not mistaken for an absent checkout),
+`RepoNotConfigured` (no checkout found), or `RepoUnreadable` again (a named checkout git
+cannot manage). Sites that deliberately degrade
 instead of failing catch it and say what the degraded answer is — upstream-remote
 resolution falls back to `origin`, build-pending detection reports nothing pending,
 fallback-remote loading leaves the list empty, sync refuses with its usual
@@ -184,7 +194,9 @@ API caller.
 
 `/fleet` is the one route that distinguishes them: `needs_setup` for the unconfigured state,
 an `error` string for the unreadable one, which the page renders as the Discovery Error
-banner naming the path (the user chose it).
+banner. For a named-but-unreadable checkout the banner names the path (the user chose it);
+for a present-but-unparseable config file it names that file, since the operator never got as
+far as a checkout.
 
 When a checkout WAS named and git cannot read it, the error names the mechanism that
 supplied the path (`_repo_source_hint`) — the remedy is to edit that one, and listing both
