@@ -245,7 +245,9 @@ _BASE_SERVICE_MEMBERS: dict[str, tuple[str, str]] = {
     "clear_terminal_monitor": ("method+async", "82db71923663"),
     "commit_monitor_replacement": ("method", "f7956b1e6531"),
     "deactivate_and_wait": ("method+async", "61dc2e194fa8"),
-    "fire_now": ("method+async", "082992b0b249"),
+    # ``delay`` arms a pulled-forward cycle after a batching window instead of at once,
+    # which is how several worker reports arriving together share one conductor turn.
+    "fire_now": ("method+async", "db9a43f4541c"),
     "get_by_id": ("method", "c7cdaf3c2920"),
     "get_by_slot": ("method", "1a9a46af4d72"),
     "list_all": ("method", "6672df12a725"),

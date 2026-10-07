@@ -718,8 +718,28 @@ async def _run_fire_cycle(self: AutoNudgeService, loop: NudgeLoop) -> None:
         self._arm_from_deadline(loop)
 
 
+def _pushed_arm_delay(loop: NudgeLoop, requested: float, now: float) -> float:
+    """*requested* seconds, clamped so a push only ever moves a fire EARLIER.
+
+    A pull-forward is allowed to bring a loop's next cycle closer and nothing else, so
+    a batching window may not outlive the deadline the loop already holds: arming past
+    it would push the loop's own scheduled tick out by the difference, because
+    :func:`_arm_timer` replaces the armed timer rather than adding a second one. A loop
+    with no deadline yet (``next_due_ts`` is 0 -- a just-delivered fire, a legacy store
+    entry) has nothing to be later than, so the window stands as asked.
+
+    Returns ``0.0`` for anything not a positive window, which is the immediate arm every
+    caller had before a window existed.
+    """
+    if requested <= 0:
+        return 0.0
+    if loop.next_due_ts <= 0:
+        return requested
+    return max(min(requested, loop.next_due_ts - now), 0.0)
+
+
 async def fire_now(
-    self: AutoNudgeService, loop_id: str, *, defer_if_firing: bool = False
+    self: AutoNudgeService, loop_id: str, *, defer_if_firing: bool = False, delay: float = 0.0
 ) -> tuple["NudgeLoop | None", str, int]:
     """Bring one loop's next cycle forward to now, out of band from its countdown.
 
@@ -742,6 +762,17 @@ async def fire_now(
     does not ambush a user mid-conversation — they keep deferring it simply
     by typing. A manual trigger IS the user asking, so the condition the beat
     protects against is not present.
+
+    ``delay`` arms the pulled-forward cycle after a BATCHING WINDOW instead of at
+    once, and is the whole mechanism behind the work-ledger wake batch: several
+    workers reporting inside one window share the single tick the first of them
+    armed, because that tick reads the ledger when it runs rather than when it was
+    armed. The window is clamped to the loop's own deadline
+    (:func:`_pushed_arm_delay`), so a push still only ever moves a fire EARLIER --
+    the arm replaces the armed timer, and an unclamped window on a loop about to
+    fire anyway would delay the loop's own scheduled tick. Zero, the default, is the
+    immediate arm every caller had before the parameter existed; a caller with a
+    person behind it keeps it, since nobody presses a button to wait a minute.
 
     Three refusals, and each one is load-bearing rather than defensive:
 
@@ -821,17 +852,22 @@ async def fire_now(
             # out the conductor's whole patrol cadence.
             self._pulled_forward.add(loop_id)
         return None, "loop is already firing", 409
-    self._arm_timer(loop, delay=0.0)
+    armed_in = _pushed_arm_delay(loop, delay, time.time())
+    self._arm_timer(loop, delay=armed_in)
     if defer_if_firing:
         # A worker's push, not a person's press: the tick it armed is marked so the gate
         # observes rather than spending the post-wake follow-up, and so a quiet answer
-        # keeps the loop's deadline. Logged at DEBUG because it happens once per worker
-        # write, turn end and close; the operator's button keeps its INFO line below.
+        # keeps the loop's deadline. The mark is also what tells a later push inside this
+        # window that the tick it needs is already armed. Logged at DEBUG because it
+        # happens once per worker write, turn end and close; the operator's button keeps
+        # its INFO line below.
         self._pushed_ticks.add(loop_id)
         logger.debug(
-            "AutoNudge: loop %s pulled forward by a worker's write -- cycle %d armed to run now",
+            "AutoNudge: loop %s pulled forward by a worker's write -- cycle %d armed to "
+            "run in %.1fs",
             loop.id,
             loop.cycle_count + 1,
+            armed_in,
         )
         return loop, "", 200
     logger.info(
