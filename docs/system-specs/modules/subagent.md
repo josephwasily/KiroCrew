@@ -2269,7 +2269,7 @@ spawn-path acquire in the third row:
 
 | Site | Fence |
 |---|---|
-| `release_conversation_impl` → `update_state` | refuses while the run is in flight, so no concurrent writer exists |
+| `_release_disk_sync` → `update_state` | off-loop from every event-loop caller: `release_conversation_async` runs the release's disk half (the `keep=False` demote and the session-file unlink) on a worker thread, so it inherits the lock, and holds the conversation in `_abandoned_state_writers` until that worker lands. The `SessionMap` forget stays on the loop and commits first |
 | `promote_retention` → injected writer | probes the state lock non-blocking, returns `RETRYABLE` on contention |
 | `create_agent_folder` → `update_execution_context` | the ONE on-loop acquire that can wait; bounded by sitting on the spawn and admission path, never a per-turn one |
 | `create_agent_folder` → `_atomic_write` | creation path; writes the initial file before any writer for the agent exists |
