@@ -420,6 +420,7 @@ from kiro_crew.dashboard.turn_dispatch import (
     spawn_guarded_turn,
     tool_approval_timeout_secs,
 )
+from kiro_crew.dashboard.urls import is_loopback
 from kiro_crew.deny_guidance import (  # noqa: F401
     DENY_CLASS_AWS_CREDENTIAL,
     DENY_CLASS_SSO_CREDENTIAL,
@@ -2310,6 +2311,31 @@ def _emit_mcp_oauth_request(
             "error": "URL contained credential or exfiltration pattern",
             "remedy": "oauth_endpoints.json",
         }
+        if endpoint is not None and is_loopback(endpoint[0]):
+            # An authorize URL on this machine. The oauth_endpoints.json remedy
+            # cannot apply here: the file refuses loopback hosts, and the gate
+            # never relaxes http or an explicit port. In practice this is the
+            # MCP client's own OAuth fallback after a local, no-auth server
+            # failed one connect, so the advice is a retry. The guard verdict
+            # above is unchanged; only the advice differs. The failed banner
+            # renders meta["error"], so the advice must ride there.
+            rejected_host, rejected_path = endpoint
+            rejected_meta.pop("remedy")
+            loopback_advice = (
+                f"sign-in URL on this machine ({rejected_host}{rejected_path}) was "
+                "rejected. A local MCP server that needs no sign-in usually lands "
+                "here when its first connection attempt failed and the MCP client "
+                "fell back to OAuth. Check the server is running, then start a new "
+                "chat to reconnect."
+            )
+            rejected_meta["error"] = loopback_advice[0].upper() + loopback_advice[1:]
+            slot.append(
+                "mcp_oauth",
+                f"🚫 {label}: {loopback_advice}",
+                "msg msg-warn",
+                meta=rejected_meta,
+            )
+            return
         endpoint_detail = ""
         if endpoint is not None:
             rejected_host, rejected_path = endpoint
