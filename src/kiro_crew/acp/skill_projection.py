@@ -2809,6 +2809,105 @@ def _env_identity(env: dict[Any, Any], volatile: frozenset[str]) -> dict[str, st
     }
 
 
+# The alias count at or above which preparation stops minting new views and
+# falls back to the authored agent, the same path ``KIROCREW_NATIVE_SKILL_PROJECTION=0``
+# takes. This is the ONE constant the doctor's backlog warning
+# (``doctor_checks.resources._SKILL_VIEW_BACKLOG_WARN``) imports, so the ceiling
+# the projection enforces and the count the doctor flags are the same number: a
+# host the doctor warns about is a host whose next spawn already fell back. It is
+# a safety net for a regression that reopens the leak the root-cause fixes closed
+# (a per-launch env value that mints a view per spawn, or one unreadable lease
+# that keeps the reclaim from draining anything), NOT the mechanism that keeps a
+# healthy host bounded -- the boot drain and per-spawn reclaim do that, far below
+# this number. Deliberately well above a healthy host's authored-agents x
+# workspaces so normal use never trips it.
+SKILL_VIEW_PROJECTION_CEILING = 2000
+
+# A directory scan is one ``os.scandir`` on the shared agents directory, run on
+# the spawn path. The count changes only when a view is minted or reclaimed, so
+# a brief per-directory cache lets a burst of session starts share one scan
+# instead of each paying for its own. Short enough that a drain or a runaway
+# launcher is seen within seconds; long enough to coalesce a start burst.
+_CEILING_COUNT_CACHE_TTL_SECS = 5.0
+_CEILING_COUNT_CACHE: dict[str, tuple[float, int]] = {}
+_CEILING_COUNT_CACHE_LOCK = threading.Lock()
+# The scan is bounded like every other walk in this module: past this many
+# entries the directory is already far over the ceiling, so counting more only
+# burns the spawn path. A capped scan still returns the ceiling, which is all the
+# caller's comparison needs.
+_CEILING_COUNT_SCAN_LIMIT = _CENSUS_MAX_ALIASES
+# One warning per process when the ceiling is in effect, not one per spawn: the
+# fallback fires on every subsequent start until the backlog drains, and a line
+# per spawn would bury the one that matters. The flag is set the first time the
+# ceiling is tripped in this process and never reset.
+_CEILING_FALLBACK_WARNED = False
+_CEILING_FALLBACK_WARNED_LOCK = threading.Lock()
+
+
+def _count_projected_aliases(directory: Path) -> int:
+    """Count ``kirocrew-skill-view-*.json`` files directly in *directory*, cached briefly.
+
+    One bounded ``os.scandir`` shared across a start burst by a short per-directory
+    cache (:data:`_CEILING_COUNT_CACHE_TTL_SECS`). Counts regular files by name
+    only -- no read, no lease probe, no sidecar -- because the ceiling asks only
+    "how many views are on disk", which is what kiro-cli pays for at startup. A
+    scan that cannot read the directory counts zero: an unreadable agents
+    directory is not a backlog, and the publication writes below would raise on
+    it anyway. The count is capped at :data:`_CEILING_COUNT_SCAN_LIMIT`; past that
+    the host is already well over the ceiling and an exact count buys nothing.
+    """
+    key = directory.absolute().as_posix()
+    now = time.monotonic()
+    with _CEILING_COUNT_CACHE_LOCK:
+        cached = _CEILING_COUNT_CACHE.get(key)
+        if cached is not None and 0.0 <= now - cached[0] < _CEILING_COUNT_CACHE_TTL_SECS:
+            return cached[1]
+    count = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if count >= _CEILING_COUNT_SCAN_LIMIT:
+                    break
+                if (
+                    entry.name.startswith(NATIVE_SKILL_ALIAS_PREFIX)
+                    and entry.name.endswith(".json")
+                    and entry.is_file(follow_symlinks=False)
+                ):
+                    count += 1
+    except OSError:
+        logger.debug(
+            "skill projection: cannot scan %s to count views for the ceiling",
+            directory,
+            exc_info=True,
+        )
+        count = 0
+    with _CEILING_COUNT_CACHE_LOCK:
+        _CEILING_COUNT_CACHE[key] = (now, count)
+    return count
+
+
+def _warn_ceiling_fallback_once(directory: Path, count: int) -> None:
+    """Warn, at most once per process, that the view ceiling is now in effect."""
+    global _CEILING_FALLBACK_WARNED
+    with _CEILING_FALLBACK_WARNED_LOCK:
+        if _CEILING_FALLBACK_WARNED:
+            return
+        _CEILING_FALLBACK_WARNED = True
+    logger.warning(
+        "skill projection: %d (cap %d reached) kirocrew-skill-view-*.json file(s) in %s; "
+        "no longer creating new skill views and falling back to authored agents until the "
+        "count drops. The count is every such file in the directory -- kiro-cli reads them "
+        "all at startup regardless of which Kiro Crew home wrote them -- so a backlog another "
+        "home leaked trips this too, and this gateway cannot drain that home's files. Run "
+        "`kiro-crew doctor`: it names any foreign-home share and the remedy (stop every "
+        "gateway using this agents directory, then move the files out). A gateway restart "
+        "runs the boot drain for this home's own files.",
+        count,
+        SKILL_VIEW_PROJECTION_CEILING,
+        directory,
+    )
+
+
 def prepare_native_skill_projection(
     work_dir: Path, *, enabled: bool | None = None, per_session_element: bool = True
 ) -> NativeSkillProjection | None:
@@ -2835,6 +2934,35 @@ def prepare_native_skill_projection(
     crew_home_id = data_home().absolute().as_posix()
     if enabled is None:
         enabled = os.environ.get("KIROCREW_NATIVE_SKILL_PROJECTION", "1") != "0"
+        # The ceiling is a spawn-time admission decision, applied ONLY on this
+        # ``enabled is None`` path -- the one that chooses whether to project at
+        # all. An explicit ``enabled=True`` is NOT a request to re-decide: the
+        # shared runtime's warm set_mode refresh passes it to re-prepare a view a
+        # live session already runs under, and there a ``None`` return is fatal
+        # (the runtime raises ``AcpRuntimeError`` and refuses the start rather
+        # than activate an unverified view). Intercepting that explicit True with
+        # the ceiling would convert a bounded backlog into a session abort for
+        # every warm shared-runtime session -- the opposite of a graceful
+        # fallback. So the ceiling never touches an explicit caller; it only
+        # declines to START projecting when nothing asked for it specifically.
+        if enabled:
+            view_count = _count_projected_aliases(directory)
+            if view_count >= SKILL_VIEW_PROJECTION_CEILING:
+                # The safety net: the agents directory already holds at least the
+                # ceiling of views, so minting more would deepen a backlog
+                # kiro-cli reads in full on every start. Fall back to the authored
+                # agent by taking the exact path ``enabled=False`` takes below --
+                # the overlay is rolled back and no view is written -- rather than
+                # a path of its own, so the two cannot diverge. An agent that
+                # already has a valid view does NOT get to keep reusing it above
+                # the ceiling on this path: no projection is prepared at all, so
+                # every agent of this spawn runs under its authored name until the
+                # backlog drains. That is deliberate -- it matches
+                # ``enabled=False`` exactly and needs no per-agent accounting on
+                # the hot path -- and the recorded choice in the PR. A healthy
+                # host never reaches here; see the ceiling constant.
+                _warn_ceiling_fallback_once(directory, view_count)
+                enabled = False
     if not enabled:
         if not (work_dir / ".kiro" / "settings" / "cli.json").exists():
             return None

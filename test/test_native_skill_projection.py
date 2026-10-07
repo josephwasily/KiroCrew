@@ -581,6 +581,126 @@ def test_disabled_projection_does_not_enumerate_agents_or_create_settings(native
     assert not (project / ".kiro").exists()
 
 
+@pytest.fixture
+def _reset_ceiling_state(monkeypatch):
+    """Isolate the ceiling's process-global warn flag and count cache per test.
+
+    ``_CEILING_FALLBACK_WARNED`` is set once per process and never reset in
+    product code (one line per process is the point), and the count cache
+    coalesces a start burst; both would leak across tests, so each ceiling test
+    starts from a clean, uncached state.
+    """
+    monkeypatch.setattr(projection, "_CEILING_FALLBACK_WARNED", False)
+    monkeypatch.setattr(projection, "_CEILING_COUNT_CACHE", {})
+    # The count must be read fresh in each prepare call these tests make.
+    monkeypatch.setattr(projection, "_CEILING_COUNT_CACHE_TTL_SECS", 0.0)
+
+
+def _fill_agents_dir_with_views(agents: Path, count: int) -> None:
+    """Write *count* ``kirocrew-skill-view-*.json`` files directly in *agents*."""
+    for n in range(count):
+        name = f"{projection.NATIVE_SKILL_ALIAS_PREFIX}{n:024x}"
+        (agents / f"{name}.json").write_text(f'{{"name":"{name}"}}', encoding="utf-8")
+
+
+def test_below_the_ceiling_a_view_is_created(native_tree, monkeypatch, _reset_ceiling_state):
+    _home, agents, project = native_tree
+    (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
+    # One short of the ceiling: preparation still mints the view.
+    monkeypatch.setattr(projection, "SKILL_VIEW_PROJECTION_CEILING", 5)
+    _fill_agents_dir_with_views(agents, 4)
+    prepared = projection.prepare_native_skill_projection(project)
+    assert prepared is not None
+    alias = prepared.agent("custom")
+    assert (agents / f"{alias}.json").exists()
+    settings = json.loads((project / ".kiro/settings/cli.json").read_text(encoding="utf-8"))
+    assert settings["chat.disableInheritingDefaultResources"] is True
+
+
+def test_at_or_above_the_ceiling_falls_back_and_writes_no_view(
+    native_tree, monkeypatch, _reset_ceiling_state, caplog
+):
+    _home, agents, project = native_tree
+    (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
+    monkeypatch.setattr(projection, "SKILL_VIEW_PROJECTION_CEILING", 5)
+    # Exactly at the ceiling (>=): no new view, authored agent fallback.
+    _fill_agents_dir_with_views(agents, 5)
+    before = sorted(p.name for p in agents.iterdir())
+    with caplog.at_level(logging.WARNING, logger=projection.logger.name):
+        assert projection.prepare_native_skill_projection(project) is None
+    # No new skill-view file and no new alias: the directory is unchanged.
+    assert sorted(p.name for p in agents.iterdir()) == before
+    # Same code path as KIROCREW_NATIVE_SKILL_PROJECTION=0: no overlay written
+    # because no cli.json existed to roll back.
+    assert not (project / ".kiro").exists()
+    fallback = [r for r in caplog.records if "falling back to authored agents" in r.message]
+    assert fallback
+    # The warning says the count spans every home's views (the conductor's
+    # option-a choice) and points at the doctor's foreign-file remedy.
+    assert "regardless of which Kiro Crew home" in fallback[0].message
+    assert "doctor" in fallback[0].message
+
+
+def test_the_ceiling_fallback_warns_once_per_process(
+    native_tree, monkeypatch, _reset_ceiling_state, caplog
+):
+    _home, agents, project = native_tree
+    (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
+    monkeypatch.setattr(projection, "SKILL_VIEW_PROJECTION_CEILING", 3)
+    _fill_agents_dir_with_views(agents, 3)
+    with caplog.at_level(logging.WARNING, logger=projection.logger.name):
+        for _ in range(4):
+            assert projection.prepare_native_skill_projection(project) is None
+    fallback_warnings = [
+        r for r in caplog.records if "falling back to authored agents" in r.message
+    ]
+    assert len(fallback_warnings) == 1
+
+
+def test_explicit_enabled_true_bypasses_the_ceiling(native_tree, monkeypatch, _reset_ceiling_state):
+    """A warm-runtime refresh (explicit ``enabled=True``) must still prepare a view.
+
+    The shared runtime re-prepares a live session's view with ``enabled=True`` at
+    set_mode, and treats a ``None`` return as fatal (it raises AcpRuntimeError and
+    refuses the start). The ceiling is a spawn-time admission decision only, so an
+    explicit ``enabled=True`` must never be converted into the authored-agent
+    fallback -- otherwise a backlog would abort every warm session.
+    """
+    _home, agents, project = native_tree
+    (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
+    monkeypatch.setattr(projection, "SKILL_VIEW_PROJECTION_CEILING", 3)
+    _fill_agents_dir_with_views(agents, 10)  # well over the ceiling
+    prepared = projection.prepare_native_skill_projection(project, enabled=True)
+    assert prepared is not None
+    assert (agents / f"{prepared.agent('custom')}.json").exists()
+
+
+def test_the_ceiling_count_is_cached_across_a_burst(native_tree, monkeypatch):
+    _home, agents, _project = native_tree
+    monkeypatch.setattr(projection, "_CEILING_COUNT_CACHE", {})
+    monkeypatch.setattr(projection, "_CEILING_COUNT_CACHE_TTL_SECS", 60.0)
+    _fill_agents_dir_with_views(agents, 7)
+    scans = {"n": 0}
+    real_scandir = projection.os.scandir
+    agents_key = agents.absolute().as_posix()
+
+    def counting_scandir(path):
+        try:
+            same = Path(path).absolute().as_posix() == agents_key
+        except TypeError:
+            same = False
+        if same:
+            scans["n"] += 1
+        return real_scandir(path)
+
+    monkeypatch.setattr(projection.os, "scandir", counting_scandir)
+    first = projection._count_projected_aliases(agents)
+    second = projection._count_projected_aliases(agents)
+    assert first == second == 7
+    # The second call inside the TTL window reused the first scan.
+    assert scans["n"] == 1
+
+
 @pytest.mark.parametrize(
     "source,inherited,expected",
     [

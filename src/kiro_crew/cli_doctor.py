@@ -71,6 +71,13 @@ from kiro_crew.acp.kas_transport import (
     KAS_RELAY_ENGINE_FLAG,
     build_kas_argv,
 )
+
+# The one skill-view count ceiling, enforced in the projection and reused as the
+# doctor's backlog-warn threshold. Imported HERE on the facade (not in the
+# doctor_checks.resources family, which binds no project module by name -- see
+# test_cli_doctor_refactor_family_reads) so the family reads it as
+# ``cli_doctor.SKILL_VIEW_PROJECTION_CEILING``.
+from kiro_crew.acp.skill_projection import SKILL_VIEW_PROJECTION_CEILING  # noqa: F401
 from kiro_crew.acp.types import ACP_BACKEND_KAS
 from kiro_crew.agent import AGENT_FILENAME, agent_spec_path
 from kiro_crew.agent_discovery import (
