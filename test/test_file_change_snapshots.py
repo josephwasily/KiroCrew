@@ -2190,6 +2190,148 @@ class TestPendingStrReplaceResolution:
         assert entry["before"] == self.PARAMS["oldStr"]
         assert entry["after"] == self.BEFORE
 
+    def test_second_identical_edit_by_another_writer_keeps_the_fragment(self, short_tmp_dir: Path):
+        """buluoray's wrong-before case, closed by the writer-id gate. The
+        snapshot is undecidable (disk valid as both pre- and post-write), so it
+        is deferred. A SECOND identical forward substitution in the same turn —
+        a DIFFERENT tool call — would, under content-only resolution, let a
+        turn-end file equal to ``if_pre_write`` settle to ``if_post_write`` (the
+        after-first-edit content) as the before, under-reporting with no flag.
+        Because the two writes carry different ``tool_call_id``s,
+        ``_record_turn_snapshot`` drops the deferred ``pending_str_replace`` at
+        record time, so the flush keeps the fragment instead of a wrong
+        before."""
+        f = short_tmp_dir / "rc"
+        f.write_text(self.BEFORE)
+        slot = _make_slot_with_assistant_message()
+        first = _snapshot_write_target(
+            {**self.PARAMS, "path": str(f)},
+            diff_old_text=self.PARAMS["oldStr"],
+            diff_path=str(f),
+        )
+        assert first is not None and "pending_str_replace" in first
+        _record_turn_snapshot(slot, first, "writer-A")
+        # Second identical substitution by a DIFFERENT tool call.
+        second = _snapshot_write_target(
+            {**self.PARAMS, "path": str(f)},
+            diff_old_text=self.PARAMS["oldStr"],
+            diff_path=str(f),
+        )
+        assert second is not None
+        _record_turn_snapshot(slot, second, "writer-B")
+        # The gate must have dropped the deferral on the held entry.
+        assert len(slot._file_changes) == 1
+        assert "pending_str_replace" not in slot._file_changes[0]
+        # Turn-end disk equals if_pre_write (the forward substitution): without
+        # the gate this would wrongly resolve; with it, the fragment stands.
+        f.write_text(self.AFTER)
+        _flush_file_changes(slot)
+        entry = slot.messages[-1]["meta"]["file_changes"][0]
+        assert entry["before"] == self.PARAMS["oldStr"]
+        assert entry["before"] != self.BEFORE
+
+    def test_second_identical_edit_by_the_same_writer_still_resolves(self, short_tmp_dir: Path):
+        """The gate is scoped to a CHANGE of writer: a single tool call whose
+        snapshot is recorded twice (same ``tool_call_id``) keeps the deferral
+        resolvable, so the ordinary single-writer resolution is unaffected."""
+        f = short_tmp_dir / "rc"
+        f.write_text(self.BEFORE)
+        slot = _make_slot_with_assistant_message()
+        snap = _snapshot_write_target(
+            {**self.PARAMS, "path": str(f)},
+            diff_old_text=self.PARAMS["oldStr"],
+            diff_path=str(f),
+        )
+        assert snap is not None and "pending_str_replace" in snap
+        _record_turn_snapshot(slot, snap, "writer-A")
+        _record_turn_snapshot(slot, dict(snap), "writer-A")
+        assert len(slot._file_changes) == 1
+        assert "pending_str_replace" in slot._file_changes[0]
+        f.write_text(self.AFTER)
+        _flush_file_changes(slot)
+        entry = slot.messages[-1]["meta"]["file_changes"][0]
+        assert entry["before"] == self.BEFORE
+        assert entry["after"] == self.AFTER
+
+    def test_shell_activity_in_the_turn_keeps_the_fragment(self, short_tmp_dir: Path):
+        """GPT 6.1's wrong-before case: a shell command editing the file after a
+        post-write snapshot is never seen by the write-tool gate (a shell does
+        not pass through ``_record_turn_snapshot``), so it cannot be gated per
+        path. When a shell ran this turn, ``_flush_file_changes`` skips pending
+        resolution entirely (``turn_had_shell``) and keeps the fragment, rather
+        than trusting a turn-end read a shell could have shaped into a false
+        pre-write match. Compare ``test_...resolves...``: identical setup, the
+        only difference is the shell flag."""
+        f = short_tmp_dir / "rc"
+        f.write_text(self.BEFORE)
+        slot = _make_slot_with_assistant_message()
+        snap = self._snapshot(f, self.BEFORE, slot)
+        assert "pending_str_replace" in snap
+        # Turn-end disk equals if_pre_write, which WOULD resolve — but a shell
+        # ran this turn, so resolution is skipped and the fragment stands.
+        f.write_text(self.AFTER)
+        _flush_file_changes(slot, turn_had_shell=True)
+        entry = slot.messages[-1]["meta"]["file_changes"][0]
+        assert entry["before"] == self.PARAMS["oldStr"]
+        assert entry["after"] == self.AFTER
+        # Control: without the shell flag the same setup resolves, proving the
+        # flag is what keeps the fragment (not some other mismatch).
+        f.write_text(self.BEFORE)
+        slot2 = _make_slot_with_assistant_message()
+        self._snapshot(f, self.BEFORE, slot2)
+        f.write_text(self.AFTER)
+        _flush_file_changes(slot2, turn_had_shell=False)
+        assert slot2.messages[-1]["meta"]["file_changes"][0]["before"] == self.BEFORE
+
+    def test_alias_spelling_in_the_same_turn_stays_one_resolvable_entry(self, short_tmp_dir: Path):
+        """The deferred-resolution path is itself why the canonical bucket is
+        in scope. An undecidable strReplace deferred under one spelling, then a
+        second write to the SAME file under an alias spelling in the same turn,
+        must stay ONE entry: the flush reads one turn-end ``after`` per bucket
+        and resolves the deferred snapshot against it. Keyed by the raw path the
+        two spellings would split into two cards — the deferred one resolving
+        against a bucket the alias write never updated — so the alias-split is
+        reachable precisely for this fix's undecidable shape. Keyed by
+        ``canonical_path`` they are one entry whose pre-write hypothesis settles
+        against the real turn-end content."""
+        f = short_tmp_dir / "rc"
+        f.write_text(self.BEFORE)
+        canon = os.path.realpath(str(f))
+        slot = _make_slot_with_assistant_message()
+        # First write: the undecidable strReplace, snapshotted under /dir/rc.
+        snap = _snapshot_write_target(
+            {**self.PARAMS, "path": str(f)},
+            diff_old_text=self.PARAMS["oldStr"],
+            diff_path=str(f),
+        )
+        assert snap is not None
+        assert snap["canonical_path"] == canon
+        assert "pending_str_replace" in snap
+        _record_turn_snapshot(slot, snap, "writer-1")
+        # Second write to the same file under the alias spelling /dir/./rc:
+        # same canonical path, so it rides the first bucket rather than opening
+        # a second card. Same known writer id, so the gate keeps the deferral
+        # resolvable (the single-known-writer case).
+        alias = f.parent / "." / f.name
+        alias_snap = _snapshot_write_target(
+            {"command": "insert", "path": str(alias)},
+            diff_old_text=self.AFTER,
+            diff_path=str(alias),
+        )
+        assert alias_snap is not None
+        assert alias_snap["canonical_path"] == canon
+        _record_turn_snapshot(slot, alias_snap, "writer-1")
+        assert len(slot._file_changes) == 1, "two spellings of one file split the deferral"
+        # Turn-end disk is the forward substitution: the deferred snapshot was
+        # pre-write, so the one card resolves to the captured disk content.
+        f.write_text(self.AFTER)
+        _flush_file_changes(slot)
+        entries = slot.messages[-1]["meta"]["file_changes"]
+        assert len(entries) == 1
+        assert entries[0]["before"] == self.BEFORE
+        assert entries[0]["after"] == self.AFTER
+        assert "pending_str_replace" not in entries[0]
+
 
 class TestPendingStrReplaceThroughTheTurnLoop:
     """The deferred-resolution call sites wired through the real ``_run_chat``.

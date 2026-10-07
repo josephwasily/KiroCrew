@@ -328,7 +328,7 @@ _BASE_SURFACE: dict[str, tuple[tuple[str, str, str], ...]] = {
         (
             "_record_turn_snapshot",
             "function",
-            "(slot: \"'_ChatSlot'\", snapshot: 'dict[str, Any]') -> 'None'",
+            "(slot: \"'_ChatSlot'\", snapshot: 'dict[str, Any]', writer_key: 'str' = '') -> 'None'",
         ),
         (
             "_resolve_pending_str_replace",

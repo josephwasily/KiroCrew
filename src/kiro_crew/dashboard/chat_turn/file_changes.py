@@ -236,14 +236,31 @@ def _resolve_pending_str_replace(pending: dict[str, Any], after: str) -> _Snapsh
     no cross-slot or shell restore can turn a resolution into a fabrication;
     the post-write (append-style) direction keeps the fragment fallback.
 
-    This is also why no completion gate is needed. A refused, failed or
-    cancelled write leaves the file UNCHANGED — equal to ``if_post_write``, the
-    snapshot content. The classifier only defers an undecidable edit, whose two
-    hypotheses differ (``if_post_write != if_pre_write``), so an unchanged file
-    fails the ``after == if_pre_write`` test and keeps the fragment on its own.
-    A later or concurrent write only changes the turn-end disk, and a resolved
-    before is captured snapshot content either way, so a second writer cannot
-    make this fabricate.
+    A refused, failed or cancelled write leaves the file UNCHANGED — equal to
+    ``if_post_write``, the snapshot content. The classifier only defers an
+    undecidable edit, whose two hypotheses differ
+    (``if_post_write != if_pre_write``), so an unchanged file fails the
+    ``after == if_pre_write`` test and keeps the fragment on its own, with no
+    completion gate needed for that case.
+
+    The cases content-only resolution would get WRONG are turn-end states this
+    slot cannot attribute to the single tracked edit, and each is removed
+    UPSTREAM of this function rather than guarded here:
+      * A second identical forward substitution by another WRITE TOOL in the
+        same turn: if this snapshot was POST-write and the same edit runs
+        again, the turn-end file equals ``if_pre_write`` and this would return
+        ``if_post_write`` (the after-first-edit content) as the before. The
+        WRITER-ID gate in ``_record_turn_snapshot`` drops the pending
+        hypothesis when a second or unknown write tool touches the same
+        canonical path, so such a payload never reaches this resolver.
+      * A shell command (or any non-write tool) editing the file after a
+        post-write snapshot: a shell is opaque, can write any path, and never
+        passes through ``_record_turn_snapshot``, so it cannot be gated per
+        path. ``_flush_file_changes`` therefore skips resolution for the whole
+        turn when a shell tool ran (its ``turn_had_shell`` argument), keeping
+        the fragment rather than trusting an unattributable turn-end read.
+    This resolver settles only the single-tracked-write case the deferral is
+    safe for, and every before it returns is captured disk content.
 
     Neither hypothesis matching (the file changed again during the turn, or the
     edit lies past the ``_MAX_SNAPSHOT`` truncation so the prefixes agree)
@@ -476,7 +493,9 @@ def _apply_turn_snapshot_budget(
 _PATH_TRUNCATION_MARKER = "..."
 
 
-def _record_turn_snapshot(slot: "_ChatSlot", snapshot: dict[str, Any]) -> None:
+def _record_turn_snapshot(
+    slot: "_ChatSlot", snapshot: dict[str, Any], writer_key: str = ""
+) -> None:
     """Hold one entry per distinct path, ordered by last write.
 
     A known path moves to the tail and keeps its first before-snapshot and
@@ -493,12 +512,38 @@ def _record_turn_snapshot(slot: "_ChatSlot", snapshot: dict[str, Any]) -> None:
     spelling would then move the ORIGINAL snapshot behind the alias's, and the
     flush — keeping the first entry per canonical key — would persist the
     alias's before and silently drop the true original.
+
+    ``writer_key`` is the bounded identity of the tool call that produced this
+    snapshot (``_tcid_identity_key`` of the redacted ``tool_call_id``, ``""``
+    for an unknown writer). It gates a deferred ``pending_str_replace``: a
+    pending snapshot stays resolvable only while EVERY write recorded for its
+    canonical path in the turn carries the SAME known id. The first write
+    stamps the held entry with its id; a later write to that path with a
+    DIFFERENT id — or an unknown id on either side (``""``) — drops the held
+    entry's ``pending_str_replace`` so the flush keeps the fragment instead of
+    settling it. This closes the wrong-before case where the first snapshot
+    lands post-write and a second identical substitution in the same turn
+    (a repeated tool call, a shell ``sed``, another session) leaves the
+    turn-end file equal to ``if_pre_write``: without the gate the resolver
+    would return the after-first-edit content as the before and under-report
+    the change with no flag. The gate fails closed — an unknown writer is
+    treated as a different one — so a resolution survives only the
+    single-known-writer case the deferral is actually safe for.
     """
     key = snapshot.get("canonical_path") or snapshot["path"]
     for index, held in enumerate(slot._file_changes):
         if (held.get("canonical_path") or held.get("path")) == key:
+            # A second writer to this path makes a deferred before unsafe:
+            # drop the pending hypothesis unless this write and the held entry
+            # share one known id, so the flush falls back to the fragment.
+            if held.get("pending_str_replace") is not None and (
+                not writer_key or held.get("writer_key") != writer_key
+            ):
+                held.pop("pending_str_replace", None)
             slot._file_changes.append(slot._file_changes.pop(index))
             return
+    if writer_key:
+        snapshot["writer_key"] = writer_key
     slot._file_changes.append(snapshot)
 
 
