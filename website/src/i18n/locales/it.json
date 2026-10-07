@@ -15531,10 +15531,11 @@
         "feature_previews": "Anteprime delle funzionalità",
         "feature_previews_desc": "Funzionalità e pagine non rilasciate. Le pagine restano nascoste dalla barra laterale e da Cerca in tutto finché non le attivi qui; gli interruttori stessi compaiono invece nella ricerca delle impostazioni. Sono incomplete di proposito e valgono solo per questo dispositivo, a meno che una scheda non dica il contrario.",
         "gateway": "Gateway",
+        "how_to_set_up_an_ssh_tunnel": "Come configurare un tunnel SSH",
         "open_developer_page": "Apri la pagina Sviluppatore",
         "run_a_local_gateway": "Esegui un gateway locale",
         "show_developer_page_in_sidebar_with_logs_system": "Mostra la pagina Sviluppatore nella barra laterale con log, metriche di sistema e dettagli interni della memoria",
-        "start_a_gateway_on_this_machine_turn_it_off_to_u": "Avvia un gateway su questa macchina. Disattivalo per usare {{productName}} solo come client, collegandosi al gateway configurato invece di eseguirne uno qui. Ha effetto al prossimo avvio dell'app."
+        "turn_it_off_only_when_a_gateway_already_answers": "Avvia un gateway su questa macchina. Lascialo attivo a meno che la porta di questa app non raggiunga già una Crew su un'altra macchina; altrimenti l'app non potrà connettersi alla prossima apertura, che è quando questa impostazione ha effetto. Serve che la Crew sia salvata per questa porta con “Set Remote Host…” nel menu Connection, più un tunnel: spunta “Keep an SSH tunnel to this crew open” lì (macOS e Linux) oppure mantieni attivo un tuo tunnel SSH. Le connessioni di Impostazioni → Crew remota si fermano quando questa opzione è disattivata, quindi non contano."
       },
       "discordPanel": {
         "allowed_server_channel_ids": "ID dei canali del server consentiti",
