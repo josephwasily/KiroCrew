@@ -1,6 +1,6 @@
-"""Per-task overrides in ``spawn_run`` ``tasks[]`` (issue #2140).
+"""Per-task overrides in ``spawn_run`` ``tasks[]``.
 
-A ``tasks`` entry may be an object ``{task, agent?, model?, reasoning_effort?}``
+A ``tasks`` entry may be an object ``{task, model?, reasoning_effort?}``
 whose fields win over the call's batch-wide value for that task only, so one
 wave can run the same prompt on two models and deliver the results together.
 Plain string entries keep their exact old behaviour.
@@ -84,16 +84,16 @@ class TestForwarding:
         assert bodies[0]["batch_id"] and bodies[0]["batch_id"] == bodies[1]["batch_id"]
         assert all(b["batch_total"] == 2 for b in bodies)
 
-    def test_per_task_effort_and_agent_override(self):
+    def test_per_task_effort_overrides_and_agents_still_apply(self):
         bodies, _ = _run_tool(
             {
-                "tasks": [{"task": "a", "reasoning_effort": "max", "agent": "kirocrew"}, "b"],
+                "tasks": [{"task": "a", "reasoning_effort": "max"}, "b"],
+                "agents": ["kirocrew", ""],
                 "reasoning_effort": "low",
             }
         )
         assert [b["reasoning_effort"] for b in bodies] == ["max", "low"]
-        assert bodies[0]["agent"] == "kirocrew"
-        assert bodies[1]["agent"] == ""
+        assert [b["agent"] for b in bodies] == ["kirocrew", ""]
 
     def test_unset_override_falls_back_and_omits_when_nothing_set(self):
         bodies, _ = _run_tool({"tasks": [{"task": "a"}, {"task": "b", "model": "gpt-6"}]})
@@ -104,12 +104,10 @@ class TestForwarding:
         bodies, _ = _run_tool({"tasks": ["t1", "t2"], "model": "m1"})
         assert [(b["task"], b["model"]) for b in bodies] == [("t1", "m1"), ("t2", "m1")]
 
-    def test_agents_array_and_object_agent_together_is_refused(self):
-        bodies, result = _run_tool(
-            {"tasks": [{"task": "a", "agent": "kirocrew"}, "b"], "agents": ["x", "y"]}
-        )
-        assert bodies == []
-        assert result.startswith("Error:")
+    def test_agent_is_not_a_task_object_field(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_tool_args({"tasks": [{"task": "a", "agent": "kirocrew"}]}, SPAWN_RUN_SCHEMA)
+        assert exc.value.field == "tasks[0].agent"
 
     def test_effort_verdict_names_each_tasks_own_level(self):
         _, result = _run_tool(

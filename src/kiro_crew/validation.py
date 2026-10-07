@@ -637,11 +637,10 @@ def validate_field(value: Any, spec: FieldSpec) -> Any:
         if spec.item_type:
             for i, item in enumerate(value):
                 if not isinstance(item, spec.item_type):
-                    expected = (
-                        spec.item_type.__name__
-                        if isinstance(spec.item_type, type)
-                        else " or ".join(t.__name__ for t in spec.item_type)
+                    item_types: tuple[type, ...] = (
+                        spec.item_type if isinstance(spec.item_type, tuple) else (spec.item_type,)
                     )
+                    expected = " or ".join(t.__name__ for t in item_types)
                     raise ValidationError(
                         spec.name,
                         f"item[{i}]: expected {expected}, got {type(item).__name__}",
@@ -1302,17 +1301,16 @@ def validate_jsonrpc_request(req: dict[str, Any]) -> tuple[str, Any, dict[str, A
 
 # ── Tool Schemas (MCP Core) ──
 
-#: One ``spawn_run`` ``tasks[]`` entry in object form (issue #2140). A string
+#: One ``spawn_run`` ``tasks[]`` entry in object form. A string
 #: entry is the plain prompt; an object entry carries the prompt plus the
 #: per-task overrides that win over the call's batch-wide value. Kept to the
-#: fields a caller varies across one wave in practice (template, model,
-#: effort); the rest stay batch-wide and can join this object later without
-#: changing the shape again.
+#: fields a caller varies across one wave in practice (model, effort); a
+#: per-task template is ``agents``. The rest stay batch-wide and can join this
+#: object later without changing the shape again.
 SPAWN_RUN_TASK_ITEM_SCHEMA = ToolSchema(
     tool_name="spawn_run.tasks[]",
     fields=[
         FieldSpec("task", str, required=True, max_len=MAX_MEDIUM_STRING),
-        FieldSpec("agent", str, max_len=MAX_SHORT_STRING, pattern=REGISTERED_AGENT_NAME_RE),
         FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
         FieldSpec("reasoning_effort", str, allowed=EFFORT_VALUES),
     ],

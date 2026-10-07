@@ -322,7 +322,6 @@ def schemas() -> list[dict[str, Any]]:
                             "type": ["string", "object"],
                             "properties": {
                                 "task": {"type": "string"},
-                                "agent": {"type": "string"},
                                 "model": {"type": "string"},
                                 "reasoning_effort": {"type": "string"},
                             },
@@ -331,7 +330,7 @@ def schemas() -> list[dict[str, Any]]:
                         },
                         "description": (
                             "Multiple tasks to run in parallel as one wave. Each entry is a "
-                            "prompt string, or an object {task, agent?, model?, "
+                            "prompt string, or an object {task, model?, "
                             "reasoning_effort?} whose fields override the call's batch-wide "
                             "value for that task only, e.g. the same review prompt on two "
                             "models, delivered together."
@@ -703,7 +702,7 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
     task = args.get("task")
 
     # Support both single task and batch tasks. A ``tasks`` entry is a prompt
-    # string or an object carrying per-task overrides (issue #2140); both
+    # string or an object carrying per-task overrides; both
     # normalise to (prompt, overrides) here so the dispatch loop has one shape.
     task_overrides: list[dict[str, str]] = []
     if tasks and isinstance(tasks, list):
@@ -764,9 +763,6 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
         return (
             f"Error: agents length ({len(agents_list)}) must match tasks length ({len(task_list)})"
         )
-    if agents_list and any("agent" in o for o in task_overrides):
-        # Two per-task sources for the same field: refuse rather than pick one.
-        return "Error: give each task's agent either in 'agents' or in its tasks[] object, not both"
     agent_ids: list[str] = []
     can_work = True
     agent_names: list[str] = []
@@ -829,7 +825,7 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
     refused_agents: dict[str, str] = {}
     for i, t in enumerate(task_list):
         over = task_overrides[i]
-        a = over.get("agent") or (agents_list[i] if agents_list else agent)
+        a = agents_list[i] if agents_list else agent
         t_model = over.get("model") or model
         t_effort = over.get("reasoning_effort") or reasoning_effort
         if a in refused_agents:
