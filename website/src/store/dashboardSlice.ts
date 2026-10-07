@@ -349,8 +349,18 @@ export const changeApprovalMode = createAsyncThunk<
   { rejectValue: { code: string; message: string } }
 >(
   'dashboard/changeApprovalMode',
-  async ({ mode, slot }, { rejectWithValue }) => {
+  async ({ mode, slot }, { rejectWithValue, getState }) => {
     try {
+      // YOLO is one app-wide setting, and the gateway keeps it on when ONE slot
+      // asks for `trust` / `trust_reads` (an automation setting up a new session
+      // must not end the operator's YOLO). So a person moving this chat from
+      // YOLO to Trust or Reads would see YOLO come back on the next status
+      // frame. Send `normal` first: it is the documented way to turn YOLO off,
+      // and the chosen mode is then applied to this slot alone.
+      const current = (getState() as { dashboard?: DashboardState }).dashboard?.approvalMode
+      if (current === 'yolo' && slot && (mode === 'trust' || mode === 'trust_reads')) {
+        await api.chatMode('normal', slot)
+      }
       await api.chatMode(mode, slot)
     } catch (e) {
       const body = e instanceof ApiError ? e.body : ''
