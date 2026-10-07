@@ -1811,6 +1811,12 @@ export default function ChatPane({
                     ? (messages[messages.length - 1]?.content.length ?? 0)
                     : 0
                 }
+                activityKey={`${messages.length}:${messages[messages.length - 1]?.content?.length ?? 0}:${streamState}`}
+                // The pane's guarded press protocol, not a bare stop(false): a
+                // repeat bare soft press is escalated server-side to a
+                // queue-clearing hard kill with no arming warning (#9547).
+                onStop={onStop}
+                stopState={paneStopState}
               />
             ),
           }}

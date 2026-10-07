@@ -3,6 +3,7 @@ import { Hourglass } from 'lucide-react'
 import { motion } from 'framer-motion'
 
 import { i18nT } from '../../i18n/t'
+import { fmtDuration, fmtUnit } from '../../i18n/format'
 import { GHOST_POSE_ICONS } from '../../components/GhostPoses'
 import { getThemeBranding } from '../../themeBranding'
 import { resolveThemeLoaderIcons } from '../../themeLoaderIcons'
@@ -244,7 +245,7 @@ export const STREAM_IDLE_MS = 700
  * One timer, re-armed on each tick: no polling interval, and nothing runs at all
  * once the stream is inactive.
  */
-export function useStreamIdle(tick: number, active: boolean, ms: number = STREAM_IDLE_MS): boolean {
+export function useStreamIdle(tick: number | string, active: boolean, ms: number = STREAM_IDLE_MS): boolean {
   const [idle, setIdle] = useState(false)
   useEffect(() => {
     if (!active) { setIdle(false); return }
@@ -255,13 +256,82 @@ export function useStreamIdle(tick: number, active: boolean, ms: number = STREAM
   return active && idle
 }
 
+/** How long a running turn may go without ANY visible progress (no new message,
+ *  no stream chunk, no state change) before the footer says so. A backend that
+ *  retries a throttled model call with backoff emits nothing at all while it
+ *  waits, so without this the user watches the loader for minutes with no way
+ *  to tell a slow answer from a stuck one. Long enough that a slow first token
+ *  does not trip it. */
+export const STALL_MS = 45_000
+
+/** Format a stall duration in whole seconds, e.g. "45s" or "1m 10s" in English.
+ *  Floored, never rounded, so the counter never runs ahead of the clock. */
+export function formatStall(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  return total < 60
+    ? fmtUnit(total, 'second', { maximumFractionDigits: 0 })
+    : fmtDuration([[Math.floor(total / 60), 'minute'], [total % 60, 'second']])
+}
+
+/**
+ * How long the turn has gone without progress, or null while it is moving.
+ *
+ * `activityKey` must change whenever anything visible happens in the turn.
+ * Reuses the single re-armed timer from `useStreamIdle` to detect the stall,
+ * and only starts a 1s ticker once stalled, so a healthy turn costs one timer.
+ */
+export function useTurnStall(activityKey: string, active: boolean, ms: number = STALL_MS): number | null {
+  const lastActivityRef = useRef(Date.now())
+  const keyRef = useRef(activityKey)
+  if (keyRef.current !== activityKey) { keyRef.current = activityKey; lastActivityRef.current = Date.now() }
+  const wasActiveRef = useRef(active)
+  if (active && !wasActiveRef.current) lastActivityRef.current = Date.now()
+  wasActiveRef.current = active
+
+  const stalled = useStreamIdle(activityKey, active, ms)
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!stalled) return
+    setNow(Date.now())
+    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [stalled])
+  return stalled ? Math.max(ms, now - lastActivityRef.current) : null
+}
+
+/** The stall notice. The sentence is a polite live region announced once when
+ *  the stall starts. The ticking duration sits outside it so a screen reader is
+ *  not re-read the notice every second. */
+export function StallNotice({ stalledMs, onStop }: { stalledMs: number; onStop?: () => void }) {
+  return (
+    <div data-testid="chat-footer-stall" className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted">
+      <span role="status" aria-live="polite">{i18nT('pages.chat.chatFooter.stalled')}</span>
+      <span className="font-mono tabular-nums" data-testid="chat-footer-stall-elapsed">{formatStall(stalledMs)}</span>
+      {onStop && (
+        <button
+          type="button"
+          onClick={onStop}
+          className="rounded border border-border px-2 py-0.5 text-[12px] text-text hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        >{i18nT('pages.chat.chatFooter.stall_stop')}</button>
+      )}
+    </div>
+  )
+}
+
 /** `streamIdleMs` is how long `streamTick` must hold still before a quiet
  *  stream counts as quiet. A live-socket host keeps the default; a POLLING host
  *  (ChatEmbed) passes a window wider than its poll interval, because its tick
  *  only advances once per poll and a shorter window would flash the indicator
  *  between every two reads of a reply that is still arriving. */
-const ChatFooter = memo(function ChatFooter({ running, stopping, state, lastRole, regenerating, stopState, streamTick = 0, sendUnconfirmed = false, streamIdleMs = STREAM_IDLE_MS }: { running: boolean; stopping: boolean; state: string; lastRole: string; regenerating?: boolean; stopState?: StopState; streamTick?: number; sendUnconfirmed?: boolean; streamIdleMs?: number }) {
+const ChatFooter = memo(function ChatFooter({ running, stopping, state, lastRole, regenerating, stopState, streamTick = 0, sendUnconfirmed = false, streamIdleMs = STREAM_IDLE_MS, activityKey, onStop }: { running: boolean; stopping: boolean; state: string; lastRole: string; regenerating?: boolean; stopState?: StopState; streamTick?: number; sendUnconfirmed?: boolean; streamIdleMs?: number; activityKey?: string; onStop?: () => void }) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
+  // Only a turn waiting on the MODEL counts as stalled. A running tool has its
+  // own progress line and may legitimately run for minutes (builds, tests,
+  // `wait`). Opt-in via `activityKey`: hosts that pass none keep the old footer.
+  const waitingOnModel = running && !regenerating && !stopping && !sendUnconfirmed
+    && stopState !== 'killing' && stopState !== 'soft_pending'
+    && state !== 'compacting' && state !== 'tool_running' && activityKey !== undefined
+  const stalledMs = useTurnStall(activityKey ?? '', waitingOnModel)
   const slug = useThemeSlug()
   const themeState = useOptionalTheme()
   const packSlug = packSlugOf(slug)
@@ -350,6 +420,7 @@ const ChatFooter = memo(function ChatFooter({ running, stopping, state, lastRole
             <span className={`text-muted text-[13px] font-mono${artFailed ? '' : ' sr-only peer-empty:not-sr-only'}`}>{i18nT('pages.chat.chatFooter.thinking')}</span>
           </div>
         )}
+        {stalledMs !== null && <StallNotice stalledMs={stalledMs} onStop={onStop} />}
       </div>
     </div>
   )

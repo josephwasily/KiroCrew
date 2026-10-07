@@ -6338,6 +6338,8 @@
       "chatFooter": {
         "compacting": "Compacting…",
         "killing": "Killing…",
+        "stall_stop": "Stop turn",
+        "stalled": "No response from the model yet. It may be rate-limited.",
         "stopping": "Stopping…",
         "thinking": "Thinking…"
       },
