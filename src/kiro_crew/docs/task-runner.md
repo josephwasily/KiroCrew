@@ -14,7 +14,7 @@ Or ask naturally: "run the task in my-task/spec.md"
 
 ### Via Dashboard
 
-Tasks page → enter the spec file path → click ▶ Start.
+Open **Task Runner** (in the **Apps** section of the left rail, or press **Alt+P** / **Option+P**). Pick an input mode — **Compose** (describe the work in plain language), **From Spec** (paste or point at a spec file), or **From YAML** — then click **Plan** to review the generated steps first, or **Run** to start straight away.
 
 ### Via Slack
 

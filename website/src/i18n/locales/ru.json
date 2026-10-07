@@ -9708,7 +9708,7 @@
       "previous_notification": "Предыдущее уведомление",
       "previous_model": "Предыдущая модель",
       "previous_reasoning_effort": "Предыдущая глубина размышлений",
-      "projects_panel": "Панель проектов",
+      "projects_panel": "Панель Task Runner",
       "schedule_panel": "Панель расписания",
       "switch_to_local": "Переключиться на локальную команду",
       "switch_to_remote_crew": "Переключиться на удалённую команду {{n}}",
