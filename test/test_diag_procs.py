@@ -1143,14 +1143,19 @@ def test_two_reads_too_close_together_decline_the_rate(tmp_path: Path) -> None:
     table.add(GATEWAY, OUTSIDER, cmdline=GATEWAY_ARGV, env=dict(MARKER))
     table.add(CHAT, GATEWAY, cmdline=CHAT_ARGV, env=dict(MARKER), utime=0, runq_ns=0)
 
+    # Two reads half a second apart, set by hand: both scans are pinned to one
+    # clock reading, so the aged window is the whole window. Unpinned, the gap
+    # is however long the runner takes between the two scans, which a loaded
+    # Windows runner stretches past the 1s floor, and the read computes a rate.
     baseline = procs.RateBaseline()
-    table.scan_rated(baseline)
-    # No ageing: two back-to-back reads are a fraction of a second apart.
+    table.scan_rated(baseline, monotonic=SCAN_MONOTONIC)
+    _age_baseline(baseline, 0.5)
     table.add(CHAT, GATEWAY, cmdline=CHAT_ARGV, env=dict(MARKER), utime=table.clk_tck * 5)
-    second = table.scan_rated(baseline)
+    second = table.scan_rated(baseline, monotonic=SCAN_MONOTONIC)
 
     assert second.nodes[CHAT].cpu_pct is None
     assert any("at least" in note for note in second.degraded_report())
+    assert any("reads 0.5s apart" in note for note in second.degraded_report())
 
 
 def test_a_read_refused_as_too_soon_does_not_restart_the_window(tmp_path: Path) -> None:
