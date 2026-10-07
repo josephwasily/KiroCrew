@@ -11699,6 +11699,8 @@
       "switch_all_sessions": "Alle Sitzungen wechseln",
       "switch_all_to_model": "Alle auf Modell umstellen…",
       "switch_failed": "Wechseln fehlgeschlagen",
+      "already_on_model_one": "{{count}} Sitzung nutzt dieses Modell bereits",
+      "already_on_model_other": "{{count}} Sitzungen nutzen dieses Modell bereits",
       "switch_session_one": "{{count}} Sitzung wechseln",
       "switch_session_other": "{{count}} Sitzungen wechseln",
       "switch_to_board_view": "Zur Board-Ansicht wechseln",

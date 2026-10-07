@@ -44,6 +44,7 @@ import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useDndSensors } from '../hooks/useDndSensors'
 import { useSessionPalette } from '../hooks/useSessionPalette'
 import { ancestorsOf, descendantsOf, orphanCitation } from '../lib/sessionLineage'
+import { partitionBulkSwitch } from '../lib/bulkModelSwitch'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { useSimplifiedToolNames } from '../hooks/useSimplifiedToolNames'
 import { useLanguage } from '../i18n/LanguageProvider'
@@ -2492,12 +2493,14 @@ function ChatSidebar({
     [bulkModelOptions, bulkModel],
   )
   const bulkRunningCount = useMemo(() => localSlots.filter(s => s.running).length, [localSlots])
-  // Count only slots that would actually change: model differs from the target
-  // (the backend leaves already-on-target slots as `unchanged`), minus running
-  // slots when skipping. Keeps the "Switch N" label + disable guard honest.
-  const bulkAffectedCount = useMemo(() => {
-    return localSlots.filter(s => (s.model ?? '') !== bulkModelPick && (!bulkSkipRunning || !s.running)).length
-  }, [localSlots, bulkModelPick, bulkSkipRunning])
+  // Count only slots that would actually change. Every slot left out lands in
+  // a named bucket the panel renders (see partitionBulkSwitch), so the
+  // "Switch N" label can be reconciled with the rows on screen.
+  const bulkPartition = useMemo(
+    () => partitionBulkSwitch(localSlots, bulkModelPick, bulkSkipRunning),
+    [localSlots, bulkModelPick, bulkSkipRunning],
+  )
+  const bulkAffectedCount = bulkPartition.affected
   const bulkModelMutation = useMutation({
     // 'auto' goes on the wire verbatim (not collapsed to ''): '' doubles as the
     // "never chosen" state that every reader re-resolves to the agent template's
@@ -4559,6 +4562,14 @@ function ChatSidebar({
               <input type="checkbox" aria-labelledby={bulkSkipRunningLabelId} checked={bulkSkipRunning} onChange={e => setBulkSkipRunning(e.target.checked)} />
               <span id={bulkSkipRunningLabelId}>{i18nT('pages.chatSidebar.skip')} {i18nT('pages.chatSidebar.running_session', { count: bulkRunningCount })}</span>
             </label>
+          )}
+          {/* The bucket the Switch count leaves out with no other surface:
+              sessions already on the pick. Without it a lower count, or a
+              disabled "Switch 0 sessions", cannot be reconciled with the rows. */}
+          {bulkModelPick && bulkPartition.onTarget > 0 && (
+            <div data-testid="bulk-model-on-target" role="status" className="text-[12px] text-muted mb-2">
+              {i18nT('pages.chatSidebar.already_on_model', { count: bulkPartition.onTarget })}
+            </div>
           )}
           {/* No hand-off: the chosen bulkModel/skipRunning selection is unsaved,
               and the navigation would discard it. Its own line, above the

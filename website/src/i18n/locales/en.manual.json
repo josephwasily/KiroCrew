@@ -5225,6 +5225,8 @@
       "lane_seed_failed": "Could not add the automatic columns.",
       "lane_seed_retry": "Try again",
       "lane_legacy_column_hint": "shows every session",
+      "already_on_model_one": "{{count}} session already uses this model",
+      "already_on_model_other": "{{count}} sessions already use this model",
       "switch_session_one": "Switch {{count}} session",
       "switch_session_other": "Switch {{count}} sessions",
       "workflow_running_one": "{{count}} workflow running",

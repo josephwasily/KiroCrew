@@ -11699,6 +11699,8 @@
       "switch_all_sessions": "सभी सत्र बदलें",
       "switch_all_to_model": "सभी को इस मॉडल पर बदलें…",
       "switch_failed": "स्विच विफल",
+      "already_on_model_one": "{{count}} सत्र पहले से इस मॉडल का उपयोग कर रहा है",
+      "already_on_model_other": "{{count}} सत्र पहले से इस मॉडल का उपयोग कर रहे हैं",
       "switch_session_one": "{{count}} सत्र बदलें",
       "switch_session_other": "{{count}} सत्र बदलें",
       "switch_to_board_view": "बोर्ड दृश्य पर जाएँ",

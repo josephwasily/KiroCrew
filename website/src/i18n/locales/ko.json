@@ -11527,6 +11527,7 @@
       "switch_all_sessions": "모든 세션 전환",
       "switch_all_to_model": "모두 다른 모델로 전환…",
       "switch_failed": "전환 실패",
+      "already_on_model_other": "세션 {{count}}개는 이미 이 모델을 사용 중",
       "switch_session_other": "세션 {{count}}개 전환",
       "switch_to_board_view": "보드 보기로 전환",
       "switch_to_flat_view_all_chats_without_folders": "플랫 보기로 전환 (폴더 없이 모든 채팅 표시)",

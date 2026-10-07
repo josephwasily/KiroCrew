@@ -11527,6 +11527,7 @@
       "switch_all_sessions": "切换所有会话",
       "switch_all_to_model": "全部切换到模型…",
       "switch_failed": "切换失败",
+      "already_on_model_other": "{{count}} 个会话已在使用此模型",
       "switch_session_other": "切换 {{count}} 个会话",
       "switch_to_board_view": "切换到看板视图",
       "switch_to_flat_view_all_chats_without_folders": "切换到平铺视图（所有聊天，不分文件夹）",
