@@ -342,9 +342,11 @@ export function resolveShortcuts(overrides: ShortcutOverrides, platform: Shortcu
  * AltGr) the physical US-QWERTY key still works, matching how every chord in
  * `useKeyboardShortcuts` has always been matched. Not mapped: `NumpadEnter`
  * (the handler has always compared `code === 'Enter'`, so the numpad key is not
- * the same chord) and the numpad digits.
+ * the same chord) and the numpad digits. Shared with the panel-toggle /
+ * quick-search recorder (`quickSearchShortcut.eventKeyToken`) so both chord
+ * families read punctuation the same way.
  */
-const CODE_TOKENS: Readonly<Record<string, string>> = {
+export const CODE_TOKENS: Readonly<Record<string, string>> = {
   Comma: ',', Period: '.', Slash: '/', Backslash: '\\', BracketLeft: '[', BracketRight: ']',
   Backquote: '`', Minus: '-', Equal: '=', Semicolon: ';', Quote: "'",
 }
