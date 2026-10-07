@@ -162,6 +162,7 @@ export type {
 export type {
   MemberRosterRow,
   MemberActivityEntry,
+  MemberRecap,
   CrewTeam,
   CrewPanelData,
   CrewPanelMeta,

@@ -66,6 +66,12 @@ every time: closing it, restarting the gateway, or coming back a week later
 reopens the same conversation with its history. That is the point of a crewmate
 over an ordinary session — the context you built up with it is where you left it.
 
+Opening a thread that is new, or idle for six hours or more, with no goal in
+flight shows a welcome card above the chat: goals the crewmate left open (in
+this thread or a recent session of its own), then its recent sessions, and a
+prompt to pick one up. It is read from the work ledger and the session list,
+with no model call and no chat turn, and shows once per idle stretch.
+
 Member threads are deliberately kept out of the Sessions list; the Crew Members
 page is their only home. The right-hand panel is the same one the chat page
 docks, so Files, Artifacts, Terminal and Browser all work against the thread,

@@ -2,11 +2,16 @@
  * The ONE "mate greeting on open" seam of the Crewmates page: what a crewmate
  * says when the user opens its chat, picked once per open.
  *
- * Today it has one kind, `warm`: the user comes back while the crewmate is in
- * the middle of a goal, and the chat opens on where that goal stands (what
- * finished, what is in progress, what needs a look) and the next step.
- * A cold-start welcome is a second kind of the same union, picked in the same
- * hook, so the page never shows two greetings for one open.
+ * Two kinds, picked in one hook so the page never shows two greetings for one
+ * open:
+ *
+ * - `warm`: the user comes back while the crewmate is in the middle of a goal,
+ *   and the chat opens on where that goal stands (what finished, what is in
+ *   progress, what needs a look) and the next step. Warm wins.
+ * - `cold`: no goal in flight, and the thread is new or idle for
+ *   `COLD_AFTER_MS`. The chat opens on a welcome that recaps the work the
+ *   crewmate holds -- goals it left open, its recent sessions -- and asks what
+ *   to pick up (`GET /api/members/{slug}/recap`).
  *
  * Built from the crewmate's own work ledger (`GET /api/crew-board`, the masked
  * read the Crew board already uses, through the same query key), never from a
@@ -15,7 +20,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../../api/client'
+import { api, type MemberRecap } from '../../api/client'
 import { isNotFoundError } from '../../api/apiError'
 import { crewBoardQueryKey, type WorkBoardItem, type WorkBoardResponse } from '../../api/crewBoard'
 import { retryPolicy } from '../../api/queryClient'
@@ -51,7 +56,46 @@ export interface MateResume {
   fingerprint: string
 }
 
-export type MateGreeting = { kind: 'warm'; slot: string; resume: MateResume }
+export type MateGreeting =
+  | { kind: 'warm'; slot: string; resume: MateResume }
+  | { kind: 'cold'; slot: string; recap: MemberRecap }
+
+/** Which crewmate a cold welcome is for, and when its thread was last active
+ *  (epoch seconds, 0 for never: the roster row's `last_active_ts`). */
+export interface ColdOpen {
+  slug: string
+  member: string
+  lastActiveTs: number
+}
+
+/** Idle time after which an open is a cold start. Past a lunch break, short of
+ *  the next working day. */
+export const COLD_AFTER_MS = 6 * 60 * 60_000
+
+/** Whether an open with no goal in flight greets cold: the thread is new or
+ *  idle long enough, and this idle stretch was not welcomed already. */
+export function isColdOpen(lastActiveTs: number, now: number, welcomedTs: string | null): boolean {
+  if (welcomedTs === String(lastActiveTs)) return false
+  return lastActiveTs <= 0 || now - lastActiveTs * 1000 >= COLD_AFTER_MS
+}
+
+const WELCOMED_PREFIX = 'kc-mate-welcomed-'
+
+function readWelcomed(slot: string): string | null {
+  try {
+    return localStorage.getItem(WELCOMED_PREFIX + slot)
+  } catch {
+    return null
+  }
+}
+
+function markWelcomed(slot: string, lastActiveTs: number): void {
+  try {
+    localStorage.setItem(WELCOMED_PREFIX + slot, String(lastActiveTs))
+  } catch {
+    // Blocked storage: the welcome may repeat on the next open, the harmless side.
+  }
+}
 
 const REASON_RANK: Record<ResumeReason, number> = { question: 0, blocked: 1, quiet: 2, done: 3 }
 
@@ -149,8 +193,15 @@ const retryUnlessNoLedger = (failureCount: number, error: unknown): boolean =>
  * The read goes through the Crew board's query key with `staleTime: 0`, so a
  * board cached by the menu or page is refreshed, never shown as this return's
  * status. It is enabled only while this open waits on it, so it never polls.
+ *
+ * `cold` names the crewmate for the cold welcome (null: none known yet). When
+ * the board says no goal is in flight, the recap is read through its own query,
+ * enabled only while this open stays idle, so a turn starting before it answers
+ * drops it. A recap with nothing in it draws no card. A cold welcome is
+ * remembered against the thread's last activity, so a reload with nothing new
+ * stays quiet and the next idle stretch welcomes once more.
  */
-export function useMateGreeting(slotKey: string, idle: boolean): {
+export function useMateGreeting(slotKey: string, idle: boolean, cold: ColdOpen | null): {
   greeting: MateGreeting | null
   failure: MateGreetingFailure | null
   dismiss: () => void
@@ -160,6 +211,12 @@ export function useMateGreeting(slotKey: string, idle: boolean): {
   // The slot whose open is waiting on its read.
   const [armed, setArmed] = useState('')
   const handled = useRef('')
+  // Read at settle time, not a dependency: the roster row moving under an open
+  // chat is not a new open.
+  const coldRef = useRef(cold)
+  coldRef.current = cold
+  // The open waiting on its recap, and the crewmate it is for.
+  const [coldArmed, setColdArmed] = useState<(ColdOpen & { slot: string }) | null>(null)
   useEffect(() => {
     if (!slotKey) {
       handled.current = ''
@@ -169,6 +226,7 @@ export function useMateGreeting(slotKey: string, idle: boolean): {
     handled.current = slotKey
     setGreeting((g) => (g?.slot === slotKey ? g : null))
     setFailure(null)
+    setColdArmed(null)
     // An open that begins mid-turn reads nothing, and is not re-armed when the
     // turn ends: this open is handled.
     setArmed(idle ? slotKey : '')
@@ -177,6 +235,7 @@ export function useMateGreeting(slotKey: string, idle: boolean): {
     if (idle) return
     setGreeting(null)
     setArmed('')
+    setColdArmed(null)
   }, [idle])
 
   const armedSlot = armed === slotKey ? armed : ''
@@ -195,20 +254,48 @@ export function useMateGreeting(slotKey: string, idle: boolean): {
   const { data, error, fetchStatus } = read
   useEffect(() => {
     if (!armedSlot || fetchStatus !== 'idle') return
+    // No goal in flight: a new or long-idle thread opens on the cold welcome.
+    const welcome = () => {
+      const c = coldRef.current
+      if (!c || !isColdOpen(c.lastActiveTs, Date.now(), readWelcomed(armedSlot))) return
+      setColdArmed({ ...c, slot: armedSlot })
+    }
     if (error) {
       setArmed('')
-      // No ledger: the chat simply opens without a greeting.
-      if (!isNotFoundError(error)) setFailure({ slot: armedSlot, error })
+      // No ledger: a crewmate that never ran a goal, the common cold case.
+      if (isNotFoundError(error)) welcome()
+      else setFailure({ slot: armedSlot, error })
       return
     }
     if (!data) return
     setArmed('')
     const resume = summarizeResume(data)
+    if (!resume) return welcome()
     const now = Date.now()
-    if (!resume || seenRecently(armedSlot, resume.fingerprint, now)) return
+    if (seenRecently(armedSlot, resume.fingerprint, now)) return
     markSeen(armedSlot, resume.fingerprint, now)
     setGreeting({ kind: 'warm', slot: armedSlot, resume })
   }, [armedSlot, data, error, fetchStatus])
+
+  const recapFor = coldArmed && coldArmed.slot === slotKey && idle ? coldArmed : null
+  const recapRead = useQuery({
+    queryKey: ['memberRecap', recapFor?.slug ?? '', recapFor?.member ?? ''],
+    queryFn: () => api.memberRecap(recapFor!.slug, recapFor!.member),
+    enabled: !!recapFor,
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    // A failed recap: the chat simply opens without a greeting.
+    retry: false,
+  })
+  useEffect(() => {
+    if (!recapFor || recapRead.fetchStatus !== 'idle') return
+    setColdArmed(null)
+    const recap = recapRead.data
+    if (!recap || (recap.paused.length === 0 && recap.recent.length === 0)) return
+    markWelcomed(recapFor.slot, recapFor.lastActiveTs)
+    setGreeting({ kind: 'cold', slot: recapFor.slot, recap })
+  }, [recapFor, recapRead.data, recapRead.fetchStatus])
 
   const dismiss = useCallback(() => {
     setGreeting(null)

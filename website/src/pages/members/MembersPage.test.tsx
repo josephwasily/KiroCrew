@@ -38,6 +38,7 @@ vi.mock('../../api/client', () => ({
     // The warm greeting's read of the crewmate's work ledger. No ledger is the
     // state every case not about the greeting wants: the chat opens bare.
     crewBoard: vi.fn(() => Promise.reject(Object.assign(new Error('no_ledger'), { status: 404 }))),
+    memberRecap: vi.fn(() => Promise.reject(new Error('no recap in this test'))),
     memberThread: vi.fn(),
     memberActivity: vi.fn(() => Promise.resolve({ slug: '', member: '', capped: false, entries: [] })),
     // The open member's folded views. The roster list carries the `roster` view
@@ -4917,6 +4918,27 @@ describe('MembersPage colliding slugs (live projection)', () => {
     })
 
     await waitFor(() => expect(starItem).toHaveTextContent('1'))
+  })
+})
+
+describe('MembersPage cold welcome (a new or long-idle thread)', () => {
+  beforeEach(() => { localStorage.clear(); sessionStorage.clear() })
+
+  it('opening a long-idle crewmate with no goal in flight recaps its paused and recent work, once', async () => {
+    vi.mocked(api.memberRecap).mockResolvedValue({
+      slug: 'oncall', member: 'oncall',
+      paused: [{ goal: 'Rotate the pager keys', next: 'confirm with Sam' }],
+      recent: [{ title: 'Triage last night\'s alarms', ts: 1 }],
+    })
+    await renderPage([row({ last_active_ts: 1 })])
+    fireEvent.click(await rosterRow('oncall'))
+    const card = await screen.findByTestId('member-welcome-card', undefined, PANE_READY)
+    expect(api.memberRecap).toHaveBeenCalledExactlyOnceWith('oncall', 'oncall')
+    expect(within(card).getByTestId('member-welcome-items')).toHaveTextContent('Paused: Rotate the pager keys (next: confirm with Sam)')
+    expect(within(card).getByTestId('member-welcome-items')).toHaveTextContent("Worked on recently: Triage last night's alarms")
+    expect(screen.queryByTestId('member-resume-card')).toBeNull()
+    expect(api.sendChat).not.toHaveBeenCalled()
+    expect(localStorage.getItem('kc-mate-welcomed-member-oncall')).toBe('1')
   })
 })
 
