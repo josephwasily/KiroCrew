@@ -20,6 +20,7 @@ import { threadLiveStore, type ThreadReplyFrame } from '../../state/threadLiveSt
 import { threadQueryKey, threadsQueryKey } from '../../api/threads'
 import { applyStatusDelta, parseStatusDelta } from '../../utils/pullRequestStatusDelta'
 import { slotChangeUrls } from '../../utils/pullRequestLinks'
+import { dashboardSessionKey, SESSION_CONTROL_STATUS_KEY } from '../useSessionControls'
 import type { ChatSlot, PullRequestStatusBatch } from '../../types'
 import { emitArtifactDeleted } from './browserEvents'
 import type { FrameData } from './frames'
@@ -339,6 +340,22 @@ export function handleSourceStatus(dispatch: AppDispatch, queryClient: QueryClie
   // delta), so there is no feedback loop.
   queryClient.invalidateQueries({ queryKey: ['pull-request-source', delta.url] })
   queryClient.invalidateQueries({ queryKey: ['pull-request-checks', delta.url] })
+}
+
+/** A finished turn re-asks the session's app-contributed control statuses.
+ *  The agent most often changes what a chip reports during a turn, and the
+ *  probes otherwise re-ask only when a control's popover closes (#10909).
+ *  Only probes of THIS session match. The composer shows the active chat
+ *  only, so the ACTIVE slot refetches its mounted probes now; a background
+ *  slot's are just marked stale, to be re-asked when the user switches to it
+ *  (the same split `refreshPullRequestsAfterTurn` below makes). */
+export function refreshSessionControlStatusesAfterTurn(queryClient: QueryClient, slot: string, isActive: boolean): void {
+  const sessionKey = dashboardSessionKey(slot)
+  if (!sessionKey) return
+  void queryClient.invalidateQueries({
+    queryKey: [SESSION_CONTROL_STATUS_KEY, sessionKey],
+    refetchType: isActive ? 'active' : 'none',
+  })
 }
 
 /** Turn boundary: the finished turn is the likeliest moment for this

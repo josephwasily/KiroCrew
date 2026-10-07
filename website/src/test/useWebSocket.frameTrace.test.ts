@@ -1268,6 +1268,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/refreshSlot/pending',
     'query refetchQueries ["pull-request-source"] {"type":"active"}',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"active"}',
+    'query invalidateQueries ["session-control-status","dashboard:slot-a"] {"refetchType":"active"}',
   ],
   "chat_done in a background slot": [
     'action chat/sseChatMessage {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z","role":"_done"}',
@@ -1277,6 +1278,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
+    'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
   ],
   "chat_done needing input": [
     'action chat/sseChatMessage {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z","needs_input":true,"continuing":false,"role":"_done"}',
@@ -1286,6 +1288,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
+    'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
   ],
   "chat_done still continuing": [
     'action chat/sseChatMessage {"slot":"slot-b","ts":"2026-09-01T00:00:00.000Z","continuing":true,"role":"_done"}',
@@ -1294,6 +1297,7 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
+    'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
   ],
   "autonudge_state update and removal": [
     'query invalidateQueries ["autonudge-loops"]',
@@ -1552,6 +1556,7 @@ const EXPECTED_LIFECYCLE: Record<string, string[]> = {
     'action chat/setSlotStatusDetail {"slot":"slot-b","kind":"idle","ts":"<clock>"}',
     'action chat/refreshSlot/pending',
     'query invalidateQueries ["pull-request-statuses"] {"refetchType":"none"}',
+    'query invalidateQueries ["session-control-status","dashboard:slot-b"] {"refetchType":"none"}',
   ],
   "an overflowing chunk lands its status before the flush; reasoning after it": [
     'action chat/setSlotStatusDetail {"slot":"slot-a","kind":"streaming","ts":"<clock>"}',
