@@ -156,6 +156,24 @@ def _probe_dashboard_health(port: int) -> None:
         pass
 
 
+# How long the token command waits for the gateway to answer. A gateway whose
+# event loop is starved by a CPU-bound thread can take 12-14 s to answer while
+# still being healthy.
+_TOKEN_REQUEST_TIMEOUT = 20.0
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """True when *exc* means the gateway took the request but answered too slowly.
+
+    A read timeout surfaces as ``TimeoutError`` (``socket.timeout`` is its
+    alias); a timeout inside ``urlopen`` arrives as ``URLError`` whose
+    ``reason`` is the ``TimeoutError``. A refused connection is neither.
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
+
+
 def _token(args: argparse.Namespace) -> None:
     """Print a dashboard URL with a fresh auth token.
 
@@ -189,7 +207,7 @@ def _token(args: argparse.Namespace) -> None:
         url += f"&embed_parent_port={int(epp)}"
     req = urllib.request.Request(url, headers={"X-Local-Secret": secret})
     try:
-        with loopback_urlopen(req, timeout=5) as resp:
+        with loopback_urlopen(req, timeout=_TOKEN_REQUEST_TIMEOUT) as resp:
             data = json.loads(resp.read())
             token = data.get("token", "")
     except urllib.error.HTTPError as exc:
@@ -206,7 +224,17 @@ def _token(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
     except Exception as exc:
-        print(f"❌ Could not reach gateway on port {port}: {exc}", file=sys.stderr)
+        if _is_timeout(exc):
+            # Something is listening and took the request, so the gateway is
+            # alive. Saying "could not reach" sends the operator to restart a
+            # healthy gateway.
+            print(
+                f"❌ Gateway on port {port} is up but did not answer within "
+                f"{_TOKEN_REQUEST_TIMEOUT:g} s (busy). Try again, or check: kirocrew status",
+                file=sys.stderr,
+            )
+        else:
+            print(f"❌ Could not reach gateway on port {port}: {exc}", file=sys.stderr)
         sys.exit(1)
 
     if not token:
