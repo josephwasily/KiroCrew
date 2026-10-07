@@ -23,6 +23,16 @@ def test_rejects_destructive():
     assert any("rm -rf" in f for f in findings)
 
 
+def test_rejects_dd_output_to_device():
+    ok, findings = validate_skill_script("run.py", "import os\nos.system('dd of=/dev/sda')\n")
+    assert ok is False
+    assert any("dd of=" in f for f in findings)
+    # The Xen root device spelling this project's own EC2 template provisions.
+    ok, findings = validate_skill_script("run.py", "import os\nos.system('dd of=/dev/xvda')\n")
+    assert ok is False
+    assert any("dd of=" in f for f in findings)
+
+
 def test_rejects_rmtree():
     ok, findings = validate_skill_script("run.py", "import shutil\nshutil.rmtree('/data')\n")
     assert ok is False
