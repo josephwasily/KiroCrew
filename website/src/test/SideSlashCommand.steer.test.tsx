@@ -22,15 +22,16 @@ import { ThemeProvider } from '../hooks/useTheme'
 import type { ChatSlot } from '../types'
 import type { RootState } from '../store'
 
-const { mockSideOpen, mockSideTurn, mockSendChat } = vi.hoisted(() => ({
+const { mockSideOpen, mockSideTurn, mockSendChat, mockChatSlotAgent } = vi.hoisted(() => ({
   mockSideOpen: vi.fn().mockResolvedValue({ ok: true, open: true, messages: 0, last_run_id: '', created_at: '' }),
   mockSideTurn: vi.fn().mockResolvedValue({ ok: true, run_id: 'r1', messages: 1 }),
   mockSendChat: vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, steered: true }) }),
+  mockChatSlotAgent: vi.fn().mockResolvedValue({ ok: true, agent: 'fable', agent_kind: 'template' }),
 }))
 
 vi.mock('../api/client', () => ({
   api: new Proxy(
-    { sideOpen: mockSideOpen, sideTurn: mockSideTurn, sendChat: mockSendChat },
+    { sideOpen: mockSideOpen, sideTurn: mockSideTurn, sendChat: mockSendChat, chatSlotAgent: mockChatSlotAgent },
     {
       get: (t, prop) => {
         if (prop in t) return (t as Record<string, unknown>)[prop as string]
@@ -200,6 +201,19 @@ describe('/side while a turn is running', () => {
     await armRunning(store)
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(mockSideTurn).toHaveBeenCalledWith(SLOT, 'what is this error about'))
+  })
+
+  it('/agent <name> goes to the agent selector, not into the running turn', async () => {
+    // The selector refuses mid-turn (409 turn_in_flight, with its own notice);
+    // steering the words into the turn would hand them to kiro-cli, where the
+    // skill projection refuses `/agent` outright.
+    const store = renderRunningChatPage()
+    const input = await screen.findByLabelText('Message input')
+    fireEvent.change(input, { target: { value: '/agent fable' } })
+    await armRunning(store)
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(mockChatSlotAgent).toHaveBeenCalledWith(SLOT, 'fable', 'template', { announce: true }))
+    expect(mockSendChat).not.toHaveBeenCalled()
   })
 
   it('/btw <message> rides the same interception — side turn, not steer', async () => {

@@ -906,6 +906,7 @@ is one coroutine in `slack/handler_runtime/commands.py` (`_bang_<name>`), dispat
 | `!yolo on/off/status` | Toggle global auto-approve for all tool calls |
 | `!agent <name>` / `!agent off` | Switch kiro-cli agent globally (all new sessions) |
 | `!ta <name>` / `!ta off` | Switch agent for current thread only |
+| `/agent <name>` | Same switch as `!ta <name>`, owner-only, routed by `_route_bang_command` before the `!` gate. In a thread linked to a dashboard chat it reaches that chat's runner instead, which switches the chat's agent |
 | `!allowlist @user` | Grant/revoke user access |
 | `!allowlist #channel` | Add/remove tracking channel |
 | `!restart` | Restart the gateway. Bang alias intercepted in `events.py` before the LLM session; delegates to `/kirocrew restart` (`_handle_restart`) so owner-check + supervisor guard stay a single source of truth (`handler.py:_BANG_TO_SLASH`) |

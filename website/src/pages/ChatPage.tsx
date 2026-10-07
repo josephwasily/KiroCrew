@@ -2007,7 +2007,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     if (!optionText && isInterceptedSlashCommand(raw)) {
       const slashPastes = pasteBlocksRef.current
       const slashTxt = slashPastes.length ? expandPasteTokens(raw, slashPastes) : raw
-      const slashResult = await interceptSlashCommand(slashTxt, uiSlot, dispatch)
+      const slashResult = await interceptSlashCommand(slashTxt, uiSlot, dispatch, {
+        // No slot yet: the same pending pick the agent picker makes, and like
+        // it, drop a model chosen for the previous agent (#2035).
+        onPendingAgent: (name) => { setPendingAgent(name, 'template'); setPendingModel('') },
+      })
       if (slashResult.intercepted) {
         // Not a send either way: the staged quote stays staged for the real one
         // -- while this slot's composer is still the live one. The await above
@@ -2021,7 +2025,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         // Keeping the composer intact is the recovery; this is the report.
         // Same surface as a refused footer press, so the reason sits above the
         // draft it left in place instead of only in the console.
-        if (slashResult.failed) {
+        // A refused /agent switch already reported on the agent-switch notice.
+        if (slashResult.failed && slashResult.stage !== 'agent') {
           setRefusedPress({
             action: slashResult.stage === 'turn' ? 'side_turn' : 'side_open',
             message: slashResult.error || i18nT('pages.chatPage.side_command_not_run'),
@@ -2550,7 +2555,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // activeSlot is left in deps as a harmless no-op: dropping it churns the
     // array for no behavior change (the ref is always current regardless).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSlot, dispatch, connected, messageQuote.consume, messageQuote.restage])
+  }, [activeSlot, dispatch, connected, messageQuote.consume, messageQuote.restage, setPendingAgent, setPendingModel])
 
   // Submit inline document comments to the session the file was opened from,
   // not the currently-active one. If the user switched sessions while the
