@@ -55,6 +55,8 @@ export interface ClientTransport {
    * can never be opted out.
    */
   jInstancesDisabled: (r: Response) => ReturnType<Response['json']>
+  /** `j` that does not journal `/api/crew-board`'s 404 `no_ledger` (see client.ts). */
+  jCrewBoard: (r: Response) => ReturnType<Response['json']>
   /** The shared `X-Session-Key: dashboard:ui` header, for a raw `fetch` that must still carry it. */
   sessionKeyHeader: { 'X-Session-Key': string }
   /** The pre-body 403 `X-Auth-Required` hook, for a method that reads its own response. */

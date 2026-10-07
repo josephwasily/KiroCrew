@@ -94,7 +94,7 @@ import { fmtList } from '../../i18n/format'
 import { i18nT } from '../../i18n/t'
 import { usePersistedBool } from '../../hooks/usePersistedBool'
 import { usePersistedString } from '../../hooks/usePersistedString'
-import { findReport, type ErrorReport } from '../../utils/errorReport'
+import { findReport, reportForError, type ErrorReport } from '../../utils/errorReport'
 import { useAppDispatch, useAppSelector } from '../../store'
 import { selectSlotStreamState, selectSlotToolLog } from '../../store/chatSlice'
 import { toolStatusLabel, type ToolStatusDetail } from '../../utils/toolStatusLabel'
@@ -108,6 +108,8 @@ import CrewStateAvatar from '../../components/CrewStateAvatar'
 import Glass from '../../components/Glass'
 import { resolvePillActivity, type PillActivityKind } from './pillActivity'
 import ChatPane from '../../components/ChatPane'
+import MateResumeCard from './MateResumeCard'
+import { useMateGreeting } from './mateGreeting'
 import type { ThreadHooks } from '../../app-sdk/messageRenderers'
 import { threadsApi, threadsQueryKey } from '../../api/threads'
 import ThreadPanel from './ThreadPanel'
@@ -2392,6 +2394,14 @@ export default function MembersPage() {
   // busy (the busy line carries no age). A separate clock from the Schedules card, because it runs under a different
   // condition.
   const pillResting = !!active && !isRunning(active) && pillStreamState === 'idle'
+  // The greeting the open chat starts on (cold welcome or warm resume), read
+  // once per open of a confirmed thread. Mid-turn means the crewmate's OWN
+  // turn: workers it runs do not count, since a goal in flight is the very case
+  // the resume speaks to.
+  const { greeting: mateGreeting, failure: mateGreetingFailure, dismiss: dismissMateGreeting } = useMateGreeting(
+    confirmedSlot,
+    pillStreamState === 'idle' && !pillLiveSlot?.running,
+  )
   const pillLastActive = (activeView ?? active)?.last_active_ts
   const [pillIdleAge, setPillIdleAge] = useState('')
   useEffect(() => {
@@ -4023,6 +4033,24 @@ export default function MembersPage() {
                     />
                   </details>
                 )}
+              </div>
+            )}
+            {mateGreeting && crewmateIdentity && (
+              <MateResumeCard resume={mateGreeting.resume} crewmate={crewmateIdentity} onDismiss={dismissMateGreeting} />
+            )}
+            {mateGreetingFailure && crewmateIdentity && (
+              /* The status read failed (not "no ledger", which is no greeting).
+                 No hand-off, for the reason the notices above give: the DM
+                 composer below may hold an unsaved draft. */
+              <div className="px-4 pt-3">
+                <ErrorNotice
+                  message={t('pages.membersPage.resume_failed', { name: crewmateIdentity.label || crewmateIdentity.name })}
+                  report={reportForError(mateGreetingFailure.error)}
+                  variant="inline"
+                  askAgent={false}
+                  onDismiss={dismissMateGreeting}
+                  testId="member-resume-error"
+                />
               </div>
             )}
             {activeSlot ? (

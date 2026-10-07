@@ -40,6 +40,9 @@ vi.mock('../../api/client', () => ({
   api: {
     members: vi.fn(),
     teams: { list: vi.fn(() => Promise.resolve({ teams: [] })) },
+    // The warm greeting's read of the crewmate's work ledger. No ledger is the
+    // state every case not about the greeting wants: the chat opens bare.
+    crewBoard: vi.fn(() => Promise.reject(Object.assign(new Error('no_ledger'), { status: 404 }))),
     memberThread: vi.fn(),
     memberActivity: vi.fn(() => Promise.resolve({ slug: '', member: '', capped: false, entries: [] })),
     memberProjections: vi.fn(() => Promise.resolve({ asOfSeq: 0, values: {} })),
