@@ -96,6 +96,7 @@ from kiro_crew.acp._dispatch import (
     parse_usage_cost,
     parse_usage_update,
     redact_text,
+    reject_option_id,
     tool_call_content_text,
 )
 from kiro_crew.acp._frame_record import record_frame
@@ -3150,6 +3151,13 @@ async def _effective_prompt_timeout_async(timeout: float | None) -> float:
 
 
 _READ_TIMEOUT = 20.0
+# Pre-turn drain (AcpClient._pre_turn_drain). The per-read wait only has to
+# cover frames the transport has already buffered, so it is short; the frame
+# cap bounds a backend that keeps writing while the drain reads; the lock
+# wait covers a previous turn whose read loop is still finalizing.
+_PRE_TURN_DRAIN_READ_TIMEOUT = 0.01
+_PRE_TURN_DRAIN_MAX_FRAMES = 2000
+_PRE_TURN_DRAIN_LOCK_WAIT = 1.0
 # After a compaction `completed` status, kiro-cli emits a fresh
 # `_kiro.dev/metadata` with the real post-compaction contextUsagePercentage
 # about ~1s later (live-probe confirmed). Wait up to this long for it so the
@@ -3773,6 +3781,14 @@ class AcpClient:
         self._session_id: str | None = None
         self._next_id = 1
         self._buffer: deque[JsonRpcMessage] = deque(maxlen=100)
+        # Request ids a _wait_for_response caller is waiting on right now. The
+        # pre-turn drain keeps a response with one of these ids: for a command
+        # call the response is the whole answer.
+        self._awaited_responses: set[int] = set()
+        # True once a read turn has ended on the current process. Only then can
+        # stdout hold frames that arrived between turns, so the pre-turn drain
+        # runs only from that point. Reset with the process.
+        self._turn_ended_on_process = False
         self._mcp_notifications: list[JsonRpcMessage] = []
         # What THIS session's MCP servers reported at init. The frames arrive
         # during _drain_notifications; reducing them to one log line and dropping
@@ -9616,6 +9632,7 @@ class AcpClient:
         # carry_over() zeroes it at the next turn boundary.
         self.last_prompt_stats.cost_session_usd = 0.0
         self._buffer.clear()
+        self._turn_ended_on_process = False
         self._stderr_lines.clear()
         # A fresh process opens a fresh registration window: cleared WITH the
         # ring, so the latch and the evidence it gates always describe the same
@@ -10780,6 +10797,27 @@ class AcpClient:
         method: str = "",
         expected_mcp: object = None,
     ) -> dict:
+        """Wait for *req_id*'s response with the id marked as awaited.
+
+        The mark is what the pre-turn drain reads to keep this response
+        instead of discarding it. See ``_wait_for_response_unmarked``.
+        """
+        self._awaited_responses.add(req_id)
+        try:
+            return await self._wait_for_response_unmarked(
+                req_id, timeout, method=method, expected_mcp=expected_mcp
+            )
+        finally:
+            self._awaited_responses.discard(req_id)
+
+    async def _wait_for_response_unmarked(
+        self,
+        req_id: int,
+        timeout: float = 50.0,
+        *,
+        method: str = "",
+        expected_mcp: object = None,
+    ) -> dict:
         """Block until a JSON-RPC response matching *req_id* arrives.
 
         Explicitly classifies JSON-RPC 2.0 messages with the same method-aware
@@ -11189,6 +11227,110 @@ class AcpClient:
 
         return "skip"
 
+    async def _pre_turn_drain(self) -> None:
+        """Clear frames that arrived on stdout while no turn was reading.
+
+        This client reads stdout only while a request is in flight. A backend
+        that writes between turns (claude-agent-acp runs a turn of its own when
+        a background task finishes) leaves those frames in the pipe, and the
+        next turn's read loop would take them as its own: an old tool call and
+        reply would show under the new message. Runs right before a turn's
+        request is written, so every frame read here predates that request and
+        none can belong to the new turn.
+
+        Per frame:
+
+        - A response whose id is in ``_awaited_responses`` is kept and put back
+          for its waiter.
+        - ``session/request_permission`` is answered with the request's own
+          reject option, and any other server request with -32601: the backend
+          blocks until it gets an answer.
+        - A config-option update is applied, as the init drain applies it: it
+          describes the session, not a turn.
+        - Everything else is discarded and counted. One warning per drain gives
+          the count and how many were terminal-shaped responses, never content
+          or sizes: a frame carries model text, tool arguments and results.
+
+        Skipped when the turn lock is still held after a short wait, which means
+        a read loop is live and owns what is on stdout.
+        """
+        if not self._turn_ended_on_process:
+            return
+        process = self._process
+        if process is None or process.stdout is None or process.returncode is not None:
+            return
+        try:
+            await asyncio.wait_for(self._turn_lock.acquire(), _PRE_TURN_DRAIN_LOCK_WAIT)
+        except TimeoutError:
+            logger.debug("pre-turn drain skipped: a read turn still holds stdout")
+            return
+        dropped = 0
+        terminals = 0
+        owed: list[JsonRpcMessage] = []
+        try:
+            for _ in range(_PRE_TURN_DRAIN_MAX_FRAMES):
+                try:
+                    msg = await self._read_message(timeout=_PRE_TURN_DRAIN_READ_TIMEOUT)
+                except AcpError:
+                    # A dead process: the turn's own send and read report it.
+                    break
+                if msg is None:
+                    break
+                if msg.method is None and msg.id is not None:
+                    if msg.id in self._awaited_responses:
+                        owed.append(msg)
+                        continue
+                    dropped += 1
+                    result = msg.result if isinstance(msg.result, dict) else {}
+                    reason = result.get("stopReason")
+                    if msg.error is not None or (isinstance(reason, str) and reason.strip()):
+                        terminals += 1
+                    continue
+                if msg.method is not None and msg.id is not None:
+                    if msg.is_method(METHOD_REQUEST_PERMISSION):
+                        params = msg.params if isinstance(msg.params, dict) else {}
+                        reject_id = reject_option_id(params)
+                        if reject_id is not None:
+                            self._permission_options[msg.id] = {"reject": reject_id}
+                        try:
+                            await self.reject_tool(msg.id)
+                        except asyncio.CancelledError:
+                            # Kept for the next drain: a dropped request leaves
+                            # the backend waiting on an answer forever.
+                            owed.append(msg)
+                            raise
+                        logger.warning(
+                            "rejected permission request id=%s that arrived "
+                            "between turns, so the backend cannot hang on it",
+                            _loggable_request_id(msg.id),
+                        )
+                    else:
+                        await self._reject_unknown_server_request(msg)
+                    continue
+                if msg.is_method(METHOD_SESSION_UPDATE):
+                    params = msg.params if isinstance(msg.params, dict) else {}
+                    update = params.get("update")
+                    if (
+                        isinstance(update, dict)
+                        and update.get("sessionUpdate") == UPDATE_CONFIG_OPTION
+                    ):
+                        self._handle_config_option_update(msg)
+                        continue
+                dropped += 1
+        finally:
+            # The loop above reads _buffer first, so retained frames go back
+            # only once it has stopped.
+            self._buffer.extend(owed)
+            self._turn_lock.release()
+        if dropped:
+            logger.warning(
+                "pre-turn drain discarded %d frame(s) that arrived between turns; "
+                "%d of them were terminal-shaped responses. Those frames reached "
+                "no consumer",
+                dropped,
+                terminals,
+            )
+
     async def _prompt_loop(
         self,
         req_id: int,
@@ -11487,6 +11629,7 @@ class AcpClient:
                 finally:
                     parked_total += max(0.0, time.monotonic() - _parked_since)
         finally:
+            self._turn_ended_on_process = True
             self._turn_lock.release()
             # Release any cooperative-stop waiter regardless of how the loop
             # ends. The callers set the precise stop reason on the clean
@@ -12303,6 +12446,7 @@ class AcpClient:
         await self.ensure_ready()
 
         cmd_name, cmd_args = parse_slash_command(command)
+        await self._pre_turn_drain()
         req_id = await self._send_request(
             METHOD_COMMANDS_EXECUTE,
             {
@@ -12551,6 +12695,7 @@ class AcpClient:
     # ── Private Helpers ──
 
     async def _send_prompt(self, message: str, *, allow_image: bool = True) -> int:
+        await self._pre_turn_drain()
         # Shared with AcpSessionHandle.prompt via prompt_blocks so the two paths
         # cannot drift.
         return await self._send_request(

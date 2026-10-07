@@ -14250,3 +14250,170 @@ def test_resolve_spawn_agent_argv_converts_a_refusal_to_acperror(tmp_path):
     client._agent = "fine"
     client._native_skill_projection = NativeSkillProjection(aliases={})
     assert client._resolve_spawn_agent_argv() == "fine"
+
+
+def _drain_frame(payload: dict) -> bytes:
+    return (json.dumps({"jsonrpc": "2.0", **payload}) + "\n").encode()
+
+
+def _drain_chunk(text: str) -> bytes:
+    return _drain_frame(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text},
+                },
+            },
+        }
+    )
+
+
+class TestPreTurnDrain:
+    """Frames written to stdout between turns never reach the next turn."""
+
+    @staticmethod
+    def _client(tmp_path, *, turn_ended: bool = True):
+        client = AcpClient(work_dir=tmp_path)
+        reader = asyncio.StreamReader()
+        process = MagicMock()
+        process.stdout = reader
+        process.returncode = None
+        client._process = process
+        client._session_id = "s1"
+        client._turn_ended_on_process = turn_ended
+        client._send_response = AsyncMock()
+        client._send_error = AsyncMock()
+        return client, reader
+
+    @pytest.mark.asyncio
+    async def test_stale_frames_are_not_yielded_by_the_next_turn(self, tmp_path):
+        client, reader = self._client(tmp_path)
+        # An agent-started turn the client never read: a reply and its terminal.
+        reader.feed_data(_drain_chunk("STALE background reply"))
+        reader.feed_data(_drain_frame({"id": 3, "result": {"stopReason": "end_turn"}}))
+
+        async def send_request(method, params):
+            # The new turn's frames arrive only once its request is written.
+            reader.feed_data(_drain_chunk("fresh answer"))
+            reader.feed_data(_drain_frame({"id": 9, "result": {"stopReason": "end_turn"}}))
+            return 9
+
+        client.ensure_ready = AsyncMock()
+        client._send_request = send_request
+
+        chunks = [chunk async for chunk in client.send_message_stream("status?", timeout=5)]
+
+        assert chunks == ["fresh answer"]
+
+    @pytest.mark.asyncio
+    async def test_awaited_response_survives_the_drain(self, tmp_path):
+        client, reader = self._client(tmp_path)
+        client._awaited_responses.add(5)
+        reader.feed_data(_drain_chunk("STALE"))
+        reader.feed_data(_drain_frame({"id": 5, "result": {"ok": True}}))
+        reader.feed_data(_drain_frame({"id": 4, "result": {"ok": True}}))
+
+        await client._pre_turn_drain()
+
+        kept = list(client._buffer)
+        assert [(m.id, m.result) for m in kept] == [(5, {"ok": True})]
+        assert not client._turn_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_stranded_permission_request_is_answered_with_its_reject_option(self, tmp_path):
+        client, reader = self._client(tmp_path)
+        reader.feed_data(
+            _drain_frame(
+                {
+                    "id": 11,
+                    "method": "session/request_permission",
+                    "params": {
+                        "sessionId": "s1",
+                        "toolCall": {"toolCallId": "t1", "title": "Bash"},
+                        "options": [
+                            {"optionId": "allow", "kind": "allow_once"},
+                            {"optionId": "deny-it", "kind": "reject_once"},
+                        ],
+                    },
+                }
+            )
+        )
+        reader.feed_data(_drain_frame({"id": 12, "method": "fs/read_text_file", "params": {}}))
+
+        await client._pre_turn_drain()
+
+        client._send_response.assert_awaited_once_with(
+            11, {"outcome": {"outcome": "selected", "optionId": "deny-it"}}
+        )
+        assert client._send_error.await_args.args[0] == 12
+        assert not client._buffer
+
+    @pytest.mark.asyncio
+    async def test_dropped_frames_are_counted_once_without_content(self, tmp_path, caplog):
+        client, reader = self._client(tmp_path)
+        for _ in range(3):
+            reader.feed_data(_drain_chunk("SECRET model text"))
+        reader.feed_data(_drain_frame({"id": 3, "result": {"stopReason": "end_turn"}}))
+
+        with caplog.at_level("WARNING", logger="kiro_crew.acp.client"):
+            await client._pre_turn_drain()
+
+        lines = [r.getMessage() for r in caplog.records if "pre-turn drain" in r.getMessage()]
+        assert len(lines) == 1
+        assert "discarded 4 frame(s)" in lines[0]
+        assert "1 of them were terminal-shaped" in lines[0]
+        assert "SECRET" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_config_option_update_is_applied_not_dropped(self, tmp_path):
+        client, reader = self._client(tmp_path)
+        frame = {
+            "method": "session/update",
+            "params": {"sessionId": "s1", "update": {"sessionUpdate": "config_option_update"}},
+        }
+        reader.feed_data(_drain_frame(frame))
+        client._handle_config_option_update = MagicMock()
+
+        await client._pre_turn_drain()
+
+        client._handle_config_option_update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_drain_before_the_first_turn_on_a_process(self, tmp_path):
+        client, reader = self._client(tmp_path, turn_ended=False)
+        reader.feed_data(_drain_chunk("session/load replay"))
+
+        await client._pre_turn_drain()
+
+        msg = await client._read_message(timeout=1.0)
+        assert msg is not None and msg.method == "session/update"
+
+    @pytest.mark.asyncio
+    async def test_drain_skips_while_a_read_turn_holds_the_lock(self, tmp_path, monkeypatch):
+        client, reader = self._client(tmp_path)
+        monkeypatch.setattr(acp_client, "_PRE_TURN_DRAIN_LOCK_WAIT", 0.01)
+        reader.feed_data(_drain_chunk("live turn frame"))
+        await client._turn_lock.acquire()
+        try:
+            await client._pre_turn_drain()
+        finally:
+            client._turn_lock.release()
+
+        msg = await client._read_message(timeout=1.0)
+        assert msg is not None and msg.method == "session/update"
+
+    @pytest.mark.asyncio
+    async def test_a_finished_read_turn_arms_the_drain(self, tmp_path):
+        client, reader = self._client(tmp_path, turn_ended=False)
+        reader.feed_data(_drain_frame({"id": 1, "result": {"stopReason": "end_turn"}}))
+
+        from contextlib import aclosing
+
+        async with aclosing(client._prompt_loop(1, timeout=5)) as loop:
+            async for _ in loop:
+                break
+
+        assert client._turn_ended_on_process is True
