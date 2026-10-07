@@ -600,7 +600,12 @@ async def test_recovery_gate_respects_live_drain_latch() -> None:
             ),
             patch.object(manager, "_write_tombstone"),
         ):
-            await manager._run(info)
+            if expect_recovery:
+                # A hand-off to recovery ends the original run cancelled.
+                with pytest.raises(asyncio.CancelledError):
+                    await manager._run(info)
+            else:
+                await manager._run(info)
 
         assert bool(recovery_calls) is expect_recovery, (
             f"latch={latch}: expected recovery_scheduled={expect_recovery}, "
