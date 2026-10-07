@@ -1334,7 +1334,9 @@ def is_denied(
                 ungated_pattern,
                 "Matched structurally on the command's argv, not by the pattern text above: "
                 "shell substitution or expansion fuses text into the push target, so the "
-                "destination branch cannot be determined before the push runs.",
+                "destination branch cannot be determined before the push runs. "
+                "Run the plain form (git push origin <branch>), or quote an option value "
+                'that is an expansion (git -C "$VAR" ...) so it cannot vanish.',
                 rule="git-publish-target-unverifiable",
                 component="git-publish-floor",
             )

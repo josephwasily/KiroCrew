@@ -93,6 +93,7 @@ from .inline_payload import (
 )
 from .shell_normalizer import (
     _AMBIGUOUS_EXPANSION_RE,
+    _GIT_ARG_FLAGS,
     _PROCESS_SUBSTITUTION_OPENERS,
     _PYTHON_INLINE_PROGRAM_FLAGS,
     _PYTHON_OPERAND_FLAGS,
@@ -108,6 +109,7 @@ from .shell_normalizer import (
     _decode_shell_quoted_literals,
     _dequote_token,
     _ends_argv,
+    _git_segment_has_opaque_preverb,
     _glob_could_expand_to,
     _is_mint_verb,
     _is_self_program,
@@ -3452,7 +3454,7 @@ def _is_ssh_to_self(text_lower: str) -> bool:
 def _is_git_publish(text_lower: str) -> bool:
     """Return True if *text_lower* invokes ``git push`` (verb-anchored).
 
-    Uses a two-pass approach:
+    Uses a three-pass approach:
 
     1. **Fast first-pass (regex):** ``_GIT_PUBLISH_RE`` and
        ``_GIT_PUBLISH_GLUE_RE`` catch normal ``git push`` invocations and
@@ -3462,6 +3464,12 @@ def _is_git_publish(text_lower: str) -> bool:
     2. **Normalizer second-pass:** ``normalize_shell_command`` strips quotes
        and empty-string concatenation so evasions like ``"git" push``,
        ``g""it push``, or ``'g'it push`` are resolved to their true tokens.
+    3. **Opaque-preverb third-pass:** per true shell segment, when the command
+       word is ``git`` and a non-plain word (unquoted expansion, command
+       substitution, glob, redirection) sits before or at the subcommand
+       position, the push target cannot be verified before the shell rewrites
+       the line (``git ${UNSET} push origin main``) — see
+       :func:`_git_segment_has_opaque_preverb`.
 
     Does NOT match ``git stash push``, ``git commit -m '...push...'``,
     ``git log --grep push``, etc.
@@ -3478,12 +3486,37 @@ def _is_git_publish(text_lower: str) -> bool:
 
     # Pass 2: normalizer-based detection (catches quote evasions like
     # "git" push, g""it push, 'g'it push)
-    return _is_git_push_via_normalizer(text_lower)
+    if _is_git_push_via_normalizer(text_lower):
+        return True
+
+    # Pass 3: subcommand-scoped fail-safe. A git invocation whose subcommand
+    # position cannot be verified as a plain publish is treated as a publish and
+    # the fail-closed machinery judges the target. Checked on the WHOLE text (so
+    # a substitution span the segment splitter tears on an inner ``;`` is still
+    # carried whole by the detector's own span-consuming walk) AND per segment
+    # (so a plain ``;``/``&&``-separated git push after a non-git command is
+    # still reached). The whole pass is wrapped FAIL-CLOSED: any unexpected
+    # exception means the input could not be verified, so it is treated as a
+    # publish (deny), never allowed and never allowed to crash the gate.
+    try:
+        if _git_segment_has_opaque_preverb(text_lower):
+            return True
+        return any(
+            _git_segment_has_opaque_preverb(segment)
+            for segment in _split_push_command_segments(text_lower)
+        )
+    except Exception:
+        logger.warning(
+            "git-publish pass-3 raised; failing closed (treating as publish)",
+            exc_info=True,
+        )
+        return True
 
 
 # Git global flags that consume a separate argument token (appear between
-# `git` and the subcommand).
-_GIT_ARG_FLAGS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace"})
+# `git` and the subcommand) are defined in ``shell_normalizer`` and imported
+# above, so the opaque-preverb detector there and the normalizer seek here read
+# the same set.
 
 
 def _is_git_push_via_normalizer(text_lower: str) -> bool:

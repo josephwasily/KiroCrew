@@ -194,7 +194,68 @@ def _url_payload_command(n: int) -> str:
 #: helper strips a local-drive namespace prefix and a default-stream suffix, and
 #: ``_candidate_forms`` resolves the folded spelling while keeping the raw one as a
 #: candidate. No target, no matching rule and no threshold moved.
-_PACKAGE_LINE_BUDGET = 28_572
+#:
+#: Set for the git-publish floor's subcommand-prefix non-plain fail-safe in
+#: ``shell_normalizer``. A git publish whose subcommand position cannot be
+#: verified as plain is denied, without a full shell parser and without computing
+#: how a vanishing word would shift the slot. The detector splits a segment into
+#: background groups only on a STANDALONE ``&`` word at span depth zero (a glued
+#: ``&``/``;`` does not split -- the glued word is non-plain instead), walks each
+#: group's command-position prefix to the command word (consuming a torn
+#: ``$(...)``/backtick/quote span, skipping assignments including ``+=`` and
+#: redirections, treating a prefix keyword ``time``/``exec``/``eval``/``command``/
+#: ``env``/``builtin`` as transparent). When the command word resolves to git it
+#: walks to the first PLAIN non-option word, skipping an option and its value
+#: only when both are plain literals; if ANY prefix word is non-plain (any ``$``
+#: expansion quoted or not, a redirection, a glob, or a word with a glued
+#: ``&``/``;``) AND a ``push`` word appears later in the group, the position is
+#: unverifiable and it denies. A group whose glued ``&``/``;`` hides a boundary
+#: and that carries both a git word and a push word denies the same way. A fully
+#: plain prefix is read precisely (``git -C /abs stash push`` allows, ``git -C .
+#: push`` denies). Accepted fail-safe cost: an expansion in the prefix plus a
+#: later push denies (``git -C $R stash push``, ``git -C "$REPO_ROOT" stash
+#: push``); the deny message says to cd into the repo or use a literal path. A
+#: git publish nested in a substitution span is left to the upstream payload walk
+#: (passes 1-2 run the publish detector on every ``$(...)``/``<(...)`` body). It
+#: reuses the existing splitter, the one quote machine and ``_resolves_to_git``;
+#: no new lexer and no threshold moved. The subcommand-prefix scope keeps ordinary
+#: git usage allowed -- a non-publish subcommand with any later arguments (``git
+#: stash push ... *.py``, ``git log --grep push``, ``git stash push 2>&1 | tail``),
+#: a non-publish-shifting value (``-C $R stash list``), and non-git mentions
+#: (``grep git``, ``command -v git``). Glued-operator detection reads the lexer's
+#: own step stream (never source offsets), so an escape that contracts the source
+#: neither shifts a lookup off the end nor makes ``\&&`` read as ``&&``; the
+#: subcommand is resolved through ``_shell_tokens`` so an ANSI-C ``$'push'`` is
+#: recognised. The whole third pass is wrapped FAIL-CLOSED in ``argv_floor``: any
+#: unexpected exception is treated as a publish (deny), never an allow or a crash.
+#: The plain-word test is an ALLOWLIST (``_PLAIN_WORD_CHARS``): a prefix or
+#: subcommand word is plain only if every lexed char is active and in
+#: ``[A-Za-z0-9_./:=@%+,-]``, so new shell syntax (brace expansion ``{,}`` and
+#: future forms) fails safe rather than needing a denylist entry. A word that
+#: lexes to nothing (``""``/``''``) is skipped as it cannot shift the subcommand;
+#: a transparent prefix keyword (``time``/``exec``/``eval``/``command``/``env``/
+#: ``builtin``/``nice``/``nohup``) is walked past its own options and a ``--``
+#: terminator to the git it runs, while a ``command``/``builtin`` lookup flag
+#: (``-v``/``-V``) stays a lookup. A quote DELIMITER is lexed away, so a quoted
+#: literal (``'status'``) is plain while an expansion inside double quotes
+#: (``"$X"``) is not. A non-plain word ANYWHERE in git's option prefix up to and
+#: including the subcommand denies on its own -- no later literal ``push`` word
+#: is required, since an expansion can become any subcommand (``git -C $R log``
+#: denies, an accepted fail-safe cost). The runner-keyword walk advances to the
+#: end of each suffix scan rather than by one keyword, so a long run of wrappers
+#: (``env env ... git push``) stays linear. A word gluing a ``&``/``;``/``|``
+#: operator (``x&git ...``) is re-split into sub-groups so a git invocation
+#: hiding after it is judged at its true command position. A DETERMINISTIC
+#: value-flag VALUE -- a leading-tilde path, a wholly quoted word, or a quoted
+#: LITERAL glued to a ``-c key=`` prefix, whose expansion cannot change the word
+#: count (``~/x``, ``"$HOME/x"``, ``'lit'``, ``core.pager="less -R"``) -- is one
+#: fixed word, so it is plain in the value slot (``git -C ~/x status``,
+#: ``git -c core.pager="less -R" log`` allowed) but stays non-plain in the
+#: subcommand position (``git "$HOME" origin main`` denies); a NON-deterministic
+#: value (unquoted ``$VAR``, a bare array ``$@``/``$*``, a subscripted array or
+#: name-list even inside double quotes -- ``"${a[@]}"``, ``"${!x@}"`` --, a
+#: command substitution, a glob) stays the documented fail-safe cost and denies.
+_PACKAGE_LINE_BUDGET = 29_185
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

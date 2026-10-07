@@ -208,6 +208,350 @@ class TestIsGitPublishDetection:
         assert _is_git_publish("echo $git is set") is False
 
 
+class TestGitPushNonPlainPreverbIsDeniedFailSafe:
+    """Subcommand-scoped fail-safe: a git invocation whose SUBCOMMAND POSITION
+    cannot be verified as a plain publish -- a non-plain word (expansion,
+    substitution, glob, quoting trick, or a prefix keyword running git) up to and
+    including the subcommand -- is treated as a publish and denied, as is a git
+    publish nested in an opaque span. Narrowly scoped to the subcommand, so
+    ordinary git usage (including a non-publish subcommand with any later
+    arguments) stays allowed. False positives on unusual-but-benign PUSH shells
+    are the accepted fail-safe cost; the plain form always works.
+    """
+
+    def test_f1_word_edge_background_operator_is_denied(self) -> None:
+        """``echo ok &git $(true) push origin main`` -- a background ``&`` with no
+        whitespace before ``git`` splits a protected push off; denied."""
+        P = "pus" + "h"
+        assert is_denied("echo ok &git $(true) %s origin main" % P) is not None
+
+    def test_f2_separator_inside_a_substitution_is_denied(self) -> None:
+        """``X=$(printf x; true) git $(true) push origin main`` -- a ``;`` inside a
+        command substitution; denied."""
+        P = "pus" + "h"
+        assert is_denied("X=$(printf x; true) git $(true) %s origin main" % P) is not None
+
+    def test_f3_backtick_assignment_value_is_denied(self) -> None:
+        """``X=`printf x` git $(true) push origin main`` -- a legacy backtick
+        substitution in an assignment value; denied."""
+        P = "pus" + "h"
+        assert is_denied("X=`printf x` git $(true) %s origin main" % P) is not None
+
+    def test_f4_time_prefix_with_option_is_denied(self) -> None:
+        """``time -p git $(true) push origin main`` -- a prefix keyword whose own
+        option would be misread as the command word; denied."""
+        P = "pus" + "h"
+        assert is_denied("time -p git $(true) %s origin main" % P) is not None
+
+    def test_f5_append_assignment_prefix_is_denied(self) -> None:
+        """``X+=x git $(true) push origin main`` -- an append assignment the plain
+        assignment matcher does not accept; denied."""
+        P = "pus" + "h"
+        assert is_denied("X+=x git $(true) %s origin main" % P) is not None
+
+    def test_a_git_publish_nested_in_an_opaque_span_is_denied(self) -> None:
+        """A git publish nested in a command/process substitution could run a
+        protected push inside it; denied."""
+        P = "pus" + "h"
+        for cmd in (
+            "cat <(git %s origin main)" % P,
+            "x=$(git %s origin main) echo done" % P,
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_representative_earlier_rounds_stay_denied(self) -> None:
+        """The expansion/substitution/grouping/prefix evasion classes remain
+        denied under the subcommand-scoped check (non-plain up to the push
+        subcommand, or a prefix keyword running git)."""
+        P = "pus" + "h"
+        for cmd in (
+            "git ${UNSET} %s origin main" % P,
+            "git $(echo '') %s origin main" % P,
+            "git '-c' x=y %s origin main" % P,
+            "exec git %s origin main" % P,
+            "eval git %s origin main" % P,
+            "command git %s origin main" % P,
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_collapsible_option_value_and_pre_subcommand_redirection(self) -> None:
+        """A value-option value that is a command substitution can collapse and
+        shift the subcommand slot (``git -C $(true) . push origin main`` ->
+        ``git -C . push origin main``), and a redirection between git and the
+        subcommand (``git 2>/dev/null push origin main``) is removed by the
+        shell; both must fail closed rather than read a remnant as a non-publish
+        subcommand."""
+        P = "pus" + "h"
+        for cmd in (
+            "git -C $(true) . %s origin main" % P,
+            "git 2>/dev/null %s origin main" % P,
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_benign_commands_with_a_non_publish_subcommand_stay_allowed(self) -> None:
+        """A ``push`` word that is NOT the git push subcommand (``git stash
+        push``, ``git log --grep push``) stays allowed, and a FULLY PLAIN option
+        prefix is read precisely (``git -C /abs stash push`` -> subcommand
+        ``stash``, allowed). A quoted literal subcommand (``'status'``) is plain
+        after lexing. The accepted fail-safe cost: an EXPANSION anywhere in the
+        prefix now denies even a non-publish subcommand (``git -C $R stash
+        list``) -- that is covered in the non-plain-prefix deny test."""
+        P = "pus" + "h"
+        for cmd in (
+            "git stash %s -m wip -- test/*.py" % P,
+            "git stash %s --include-untracked -m wip" % P,
+            "git -C /abs stash %s -m wip" % P,
+            "git -C ./rel/path stash %s" % P,
+            "git log --oneline --grep %s -- docs/*.md" % P,
+            "git -c user.name=x stash %s" % P,
+            'git stash %s -m "wip" 2>&1 | tail -3' % P,
+        ):
+            assert is_denied(cmd) is None, cmd
+
+    def test_nonplain_prefix_with_a_later_push_word_is_denied(self) -> None:
+        """A non-plain word (an expansion quoted or not, a redirection, a glob,
+        or a glued ``&``/``;``) in a git command's option prefix, together with a
+        ``push`` word later in the segment, cannot be verified as a non-publish
+        and denies -- the vanished/re-split prefix word can shift ``push`` into
+        the subcommand slot. Covers the GPT F1-F3 shapes and the accepted
+        fail-safe cost; the workaround is to cd into the repo or use a literal
+        path and quote values."""
+        P = "pus" + "h"
+        for cmd in (
+            # unquoted / quoted expansion value, including repeated and $@
+            "git -C $@ . %s origin main" % P,
+            'git -C "$@" . %s origin main' % P,
+            "git -C $@ . -C $@ . %s origin main" % P,
+            "git -C $REPO_ROOT stash %s -m wip" % P,
+            "git -C ${X} stash %s" % P,
+            "git -C $(true) . %s origin main" % P,
+            # a double-quoted single-param expansion standing in the SUBCOMMAND
+            # position is still non-plain (it is a value only after a value-flag)
+            'git -C /abs "$SUB" origin main',
+            # a redirection standing where the option value is read
+            "git -C < /dev/null . %s origin main" % P,
+            "git 2>/dev/null %s origin main" % P,
+            # a glued background operator hiding a git push boundary
+            "echo ok &git $(true) %s origin main" % P,
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_background_operator_inside_a_substitution_does_not_split(self) -> None:
+        """A background ``&`` inside a command substitution is the subshell's,
+        not the outer line's, so it must not split the group and lose the outer
+        git push -- standalone or glued inside a single word: ``X=$(true & wait)
+        git $(true) push origin main`` and ``X=$(true&wait) git $(true) push
+        origin main`` both deny."""
+        P = "pus" + "h"
+        for cmd in (
+            "X=$(true & wait) git $(true) %s origin main" % P,
+            "X=$(true&wait) git $(true) %s origin main" % P,
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_prefix_keyword_running_a_non_protected_git_stays_allowed(self) -> None:
+        """A prefix keyword is transparent: the real git subcommand is judged, so
+        a non-publish subcommand (``eval 'git' 'status'``) and a feature-branch
+        push (``eval 'git' 'push origin my-feature'``) stay allowed; only a
+        protected target or an unverifiable position denies."""
+        P = "pus" + "h"
+        for cmd in (
+            "eval 'git' 'status'",
+            "eval 'git' '%s origin my-feature'" % P,
+            "exec git %s origin my-feature" % P,
+            "time git %s origin my-feature" % P,
+        ):
+            assert is_denied(cmd) is None, cmd
+
+    def test_escaped_operators_do_not_crash_and_escaped_boundary_denies(self) -> None:
+        """An escaped character must not crash the detector (the glued-operator
+        scan reads the lexer's own steps, not source offsets), and an escaped
+        ``\\&&`` is a literal, not a ``&&`` control operator, so a git push
+        hidden behind it is denied rather than slipping through."""
+        P = "pus" + "h"
+        # Must NOT raise: escape-collapsed text indexed by source offset would
+        # IndexError, so the scan reads the lexer's steps instead.
+        assert is_denied(r"echo a\ b\ c\ d;") is None
+        assert is_denied(r"echo a\ b\ c\ d") is None
+        # Escaped ``\&&`` is a literal boundary hiding a protected push -> deny.
+        assert is_denied(r"echo \&&git $(true) %s origin main" % P) is not None
+
+    def test_ansi_c_quoted_push_subcommand_is_denied(self) -> None:
+        """``git $(true) $'push' origin main`` -- the subcommand is an ANSI-C
+        quoted ``$'push'`` that bash runs as ``push``; it is resolved through the
+        argv tokenizer and denied, not read as the literal ``$push``."""
+        P = "pus" + "h"
+        assert is_denied("git $(true) $'%s' origin main" % P) is not None
+        assert is_denied("git p$'%s' origin main" % P[1:]) is not None
+
+    def test_detector_fails_closed_on_an_unexpected_exception(self, monkeypatch) -> None:
+        """If the git-publish third pass raises unexpectedly, the gate treats the
+        input as a publish (deny), never allowing it through and never crashing.
+        A protected-looking push whose detection path is forced to raise still
+        denies."""
+        P = "pus" + "h"
+        from kiro_crew.security import argv_floor
+
+        def _boom(_segment: str) -> bool:
+            raise RuntimeError("forced detector failure")
+
+        monkeypatch.setattr(argv_floor, "_git_segment_has_opaque_preverb", _boom)
+        # A form passes 1-2 do not catch, so pass 3 (now raising) is consulted;
+        # the wrapper must turn the exception into a deny.
+        assert is_denied("git -C $@ . %s origin main" % P) is not None
+
+    def test_plain_pushes_and_non_push_git_stay_allowed(self) -> None:
+        """The simple shapes the splitter models cleanly stay allowed: a plain
+        feature push, leading assignments, an ``&&`` chain, modelled
+        redirections, a non-push git command carrying a glob, and a non-git
+        mention of the word ``git``."""
+        P = "pus" + "h"
+        for cmd in (
+            "git %s origin my-feature" % P,
+            "VAR=val git %s origin my-feature" % P,
+            "A=1 B=2 git %s origin my-feature" % P,
+            "make build && git %s origin my-feature" % P,
+            "git %s origin my-feature 2>&1" % P,
+            "git %s origin my-feature >out.log" % P,
+            "git commit -m x && git %s origin my-feature" % P,
+            "git add *.py",
+            "git diff *.py",
+            "grep git *.py",
+            "command -v git",
+        ):
+            assert is_denied(cmd) is None, cmd
+
+    def test_plain_word_test_is_an_allowlist(self) -> None:
+        """A prefix/subcommand word is plain only if every lexed char is active
+        and in the allowlist [A-Za-z0-9_./:=@%+,-]; anything else is non-plain,
+        so unmodelled syntax fails safe. Brace expansion (`{,}`) and a `--`
+        option terminator after a transparent keyword both deny; a tilde path and
+        a quoted word STANDING IN THE SUBCOMMAND POSITION (both carrying a
+        non-allowlist character) deny too -- the value-slot deterministic-value
+        exception does not reach the subcommand position."""
+        P = "pus" + "h"
+        for cmd in (
+            "git {,} %s origin main" % P,  # F1 brace expansion
+            "command -- git $(true) %s origin main" % P,  # F2 -- terminator
+            "env -- git $(true) %s origin main" % P,
+            "nice -n 5 git $(true) %s origin main" % P,  # runner + option value
+            "git ~ origin main",  # tilde AS the subcommand is non-plain
+            "git 'a b' origin main",  # quoted word AS the subcommand is non-plain
+        ):
+            assert is_denied(cmd) is not None, cmd
+        # Allowlist literals in the prefix stay allowed (plain paths, k=v).
+        for cmd in (
+            "git -C /abs/path stash %s -m wip" % P,
+            "git -C ./rel stash %s" % P,
+            "git -c user.name=x stash %s" % P,
+            "command -v git",
+            "builtin -V git",
+        ):
+            assert is_denied(cmd) is None, cmd
+
+    def test_opaque_subcommand_denies_without_a_literal_push_word(self) -> None:
+        """An expansion standing in (or before) the subcommand position can
+        become any subcommand, so a non-plain word up to and including the
+        subcommand denies even when no LITERAL ``push`` word is present. Accepted
+        fail-safe cost: an expansion in the prefix denies a non-publish verb too
+        (``git -C $R log``); the workaround is a literal path."""
+        P = "pus" + "h"
+        for cmd in (
+            "git $@ ${1:-%s} origin main" % P,  # opaque verb, no literal push
+            "git ${X} origin main",  # opaque subcommand, no push word at all
+            "git -C $R log",  # accepted FP: expansion prefix, non-publish verb
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_substitution_spans_are_opaque_to_segment_splitting(self) -> None:
+        """A ``;``/``;;``/``&``/``|`` inside a ``$(...)``/``<(...)``/backtick span
+        does not split the outer command, so a git push after such a span is
+        still seen."""
+        P = "pus" + "h"
+        for cmd in (
+            "x=$(true; false) git $(true) %s origin main" % P,
+            "x=$(a | b) git $(true) %s origin main" % P,
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_glued_command_operator_splits_into_a_checked_git_group(self) -> None:
+        """A git invocation hiding after a glued ``&``/``;``/``|`` operator
+        (``x&git ...``) is a command boundary the whitespace splitter did not
+        break on, so the group is re-split at the operator and the hidden git is
+        judged at its true command position -- a non-plain or opaque subcommand
+        there denies."""
+        P = "pus" + "h"
+        for cmd in (
+            "x&git {,%s} origin main" % P,  # glued & + brace subcommand
+            "x&git $@ %s origin main" % P,  # glued & + opaque prefix
+            "ok;git $@ %s origin main" % P,  # glued ;
+            "a|git $@ %s origin main" % P,  # glued |
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+    def test_deterministic_value_is_plain_in_the_value_slot(
+        self,
+    ) -> None:
+        """A DETERMINISTIC value-flag VALUE -- one whose expansion cannot change
+        the word count or add an operator -- occupies one fixed slot and cannot
+        shift the subcommand, so it is plain in the value position: a leading
+        tilde path, a wholly single/double-quoted word, a scalar
+        ``"$VAR"``/``"${VAR}"`` with or without literal path text, and a quoted
+        LITERAL glued to a ``-c key=`` prefix (``-c core.pager="less -R"``) are
+        allowed. In the SUBCOMMAND position such a word is never routed here, so
+        it stays non-plain and denies. The NON-deterministic forms -- an unquoted
+        ``$VAR`` (can split or vanish), a bare array ``$@``/``$*``, a SUBSCRIPTED
+        array or name-list even inside double quotes (``"${a[@]}"``, ``"${!x@}"``
+        -- zero-or-many words), a command substitution, a glob -- stay the
+        documented fail-safe cost and deny."""
+        P = "pus" + "h"
+        for cmd in (
+            "git -C ~/src/KiroCrew status --porcelain",  # (a) tilde path
+            "git -C ~/src/KiroCrew fetch origin main",
+            "git -C ~user/src log --oneline -20",
+            "git -C ~ status",
+            'git -C "$HOME/src/KiroCrew" log --oneline -20',  # (a) scalar+suffix
+            'git -C "$HOME/src/KiroCrew" status',
+            'git -C "${REPO}/sub" log',
+            'git -C "$VAR" status',
+            'git -C "/abs/path" stash %s' % P,  # (a) quoted literal
+            "git -C '/abs/path' stash %s" % P,
+            "git -C /abs stash %s" % P,  # plain literal
+            # (a) a quoted-literal value GLUED to a ``-c key=`` prefix is one
+            # fixed word (the quotes suppress splitting of the literal), so it is
+            # deterministic even though the allowlist alone would reject the
+            # quote. These are the Security Scope corpus's partially-quoted rows.
+            'git -c core.pager="less -R" log --oneline -20',
+            'git -c core.sshCommand="ssh -o BatchMode=yes" fetch origin main',
+            'git -c user.name="Kiro Bot" -c user.email=bot@example.com commit -F /tmp/m',
+            "git -c core.pager='less -R' log",  # single-quoted glued literal
+        ):
+            assert is_denied(cmd) is None, cmd
+        for cmd in (
+            "git -C $HOME/src/KiroCrew log",  # (b) UNQUOTED scalar can split
+            "git -C $R stash list",
+            'git -C "$@" status',  # (b) array expansion
+            'git -C "$*" status',
+            'git -C "$(pwd)" status',  # (b) command substitution
+            "git -C $(pwd) status",
+            "git -C ~/*/repo status",  # (b) glob
+            # (b) a SUBSCRIPTED array / name-list in a double-quoted value is
+            # zero-or-many words even quoted, so it stays non-deterministic and a
+            # following publish denies (the Opus candidate-1 bypass shapes).
+            'git -C "${a[@]}" . %s origin main' % P,
+            'git -C "${a[*]}" . %s origin main' % P,
+            'git -C "${a[@]-}" . %s origin main' % P,
+            'git -C "${a[@]:0}" . %s origin main' % P,
+            'git -C "${!x@}" . %s origin main' % P,
+            'git -c x="$(id)" %s origin main' % P,  # cmdsub glued to -c value
+            'git -c x="${a[@]}" %s origin main' % P,  # array glued to -c value
+            'git -C "$VAR" %s' % P,  # quoted value, but push subcommand -> deny
+            'git "$HOME" origin main',  # quoted scalar AS the subcommand -> deny
+            "git ~ origin main",  # tilde AS the subcommand -> deny
+        ):
+            assert is_denied(cmd) is not None, cmd
+
+
 @pytest.fixture
 def captured_sel_events(monkeypatch):
     """Capture SEL events without real I/O (isolate the ambient forensic log)."""
