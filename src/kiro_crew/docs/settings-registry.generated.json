@@ -1045,6 +1045,13 @@
       "configKey": "dashboard.terminal.completion.enabled"
     },
     {
+      "id": "display.cursor-style",
+      "label": "Cursor style",
+      "tab": "display",
+      "route": "/settings/display/terminal?highlight=display.cursor-style",
+      "description": "Shape of the cursor in the built-in terminal. Block is the default; bar and underline are thinner, so they do not cover the character under the cursor."
+    },
+    {
       "id": "display.custom-font",
       "label": "Custom font",
       "tab": "display",
