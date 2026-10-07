@@ -1,15 +1,18 @@
-/** Real-browser evidence for #16617: a crewmate's messages carry no author line.
+/** Real-browser evidence for the crewmate bubble: no author line (#16617), no
+ * "Steered" chip (#17838).
  *
  * Drives website/capture/crewmate-run.html (real ChatMessageList + crewmate
- * renderers) per theme and asserts, on the AFTER tree, that no
- * `crewmate-author` row and no avatar gutter precede any bubble. Pass
- * --expect-author to assert the OPPOSITE on a pre-#16617 tree, which is how the
- * "before" frame of the PR body is taken from the same script.
+ * renderers, last reply carrying a `[STEERING …]` ack) per theme and asserts,
+ * on the AFTER tree, that no `crewmate-author` row and no avatar gutter precede
+ * any bubble, and that no "Steered" chip closes one while the raw marker is
+ * never shown. Pass --expect-author / --expect-chip to assert the OPPOSITE on a
+ * tree that predates the respective fix, which is how the "before" frame of a
+ * PR body is taken from the same script.
  *
  * Usage:
  *   npx vite --host 127.0.0.1 --port 6882 --strictPort            # in website/
  *   node scripts/capture-crewmate-run.mjs http://127.0.0.1:6882 ../temp-screenshots/crewmate-run after
- *   node scripts/capture-crewmate-run.mjs http://127.0.0.1:6881 ../temp-screenshots/crewmate-run before --expect-author
+ *   node scripts/capture-crewmate-run.mjs http://127.0.0.1:6881 ../temp-screenshots/crewmate-run before --expect-chip
  */
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
@@ -19,6 +22,7 @@ const BASE = process.argv[2] || 'http://127.0.0.1:6882'
 const OUT = resolve(process.argv[3] || '../temp-screenshots/crewmate-run')
 const TAG = process.argv[4] || 'after'
 const expectAuthor = process.argv.includes('--expect-author')
+const expectChip = process.argv.includes('--expect-chip')
 mkdirSync(OUT, { recursive: true })
 const { LD_LIBRARY_PATH: _mise, ...browserEnv } = process.env
 const browser = await chromium.launch({ env: browserEnv })
@@ -41,6 +45,13 @@ for (const theme of ['dark', 'light']) {
   } else {
     check(`[${theme}/${TAG}] no author line on any message`, authors === 0)
     check(`[${theme}/${TAG}] no avatar gutter under any bubble`, gutters === 0)
+  }
+  const chips = await page.getByText('Steered', { exact: true }).count()
+  check(`[${theme}/${TAG}] raw [STEERING …] marker never shown`, await page.getByText('[STEERING').count() === 0)
+  if (expectChip) {
+    check(`[${theme}/${TAG}] "Steered" chip closes the last reply (pre-#17838)`, chips === 1)
+  } else {
+    check(`[${theme}/${TAG}] no "Steered" chip on any reply`, chips === 0)
   }
   check(`[${theme}/${TAG}] no page errors`, errors.length === 0)
   await page.screenshot({ path: resolve(OUT, `${theme}-${TAG}.png`) })

@@ -4,7 +4,10 @@
  * a user message, a two-bubble crewmate run, a second user message and a lone
  * crewmate reply. What the page proves is how one message of the crewmate is
  * placed -- whether an author line (avatar + name + time) and an avatar gutter
- * precede the bubble -- so no header, composer or side panel is drawn.
+ * precede the bubble -- so no header, composer or side panel is drawn. The
+ * last reply carries the `[STEERING …]` ack kiro-cli emits when a send landed
+ * mid-turn, so the same page also proves whether a "Steered" chip closes a
+ * crewmate's bubble (#17838).
  *
  * Query string: ?theme=dark|light
  *
@@ -52,7 +55,9 @@ const TRANSCRIPT: ChatMessage[] = [
   ].join('\n'), '2026-10-05T07:40:21Z', 'm2'),
   row('assistant', 'Filed it as #16628 with the `asyncio.to_thread` fix sketched. Waiting on triage.', '2026-10-05T07:40:24Z', 'm3'),
   row('user', 'Good. And the dispatcher?', '2026-10-05T07:52:00Z', 'm4'),
-  row('assistant', 'Back up since 08:22Z: it no longer mints an owner token, it presents the cron\'s own credential. First cycle dispatched 4 of the backlog.', '2026-10-05T08:24:02Z', 'm5'),
+  // "And the dispatcher?" landed while the crewmate was still working, so its
+  // reply carries kiro-cli's inline steer acknowledgement.
+  row('assistant', 'Back up since 08:22Z: it no longer mints an owner token, it presents the cron\'s own credential. First cycle dispatched 4 of the backlog.\n\n[STEERING steer-4f2a: answered the dispatcher question first]', '2026-10-05T08:24:02Z', 'm5'),
 ]
 
 function Scene() {
