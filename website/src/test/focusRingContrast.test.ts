@@ -96,6 +96,7 @@ const LAYERS: { where: string; token: string }[] = [
   { where: '.focus-ring primitive hairline', token: '--text-strong' },
   { where: '.focus-ring-accent utility hairline', token: '--text-strong' },
   { where: '.focus-ring-accent-inset utility hairline', token: '--text-strong' },
+  { where: '.focus-ring-accent-gap utility hairline', token: '--text-strong' },
 ]
 
 const stripComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -107,11 +108,18 @@ describe('every keyboard focus cue clears 3:1 non-text contrast in every theme',
 
     // The global ring now pairs the accent outline with an opaque hairline; both
     // halves must be present, or the measurement below is measuring a layer the
-    // stylesheet does not paint.
-    const global = /(?:^|[};])\s*:focus-visible\s*\{([^}]*)\}/m.exec(ACTIVE)
+    // stylesheet does not paint. The rule is scoped away from text inputs /
+    // textareas / contenteditables (they match :focus-visible on a pointer click
+    // and opt out with `outline-hidden`, which does not reset box-shadow), so the
+    // selector carries `:not(input):not(textarea):not([contenteditable])`.
+    const global = /(?:^|[};])\s*:focus-visible(:not\([^)]*\))*\s*\{([^}]*)\}/m.exec(ACTIVE)
     expect(global, 'no global :focus-visible rule in index.css').not.toBeNull()
-    expect(global![1], 'global :focus-visible lost its accent outline').toMatch(/outline:\s*2px solid var\(--accent\)/)
-    expect(global![1], 'global :focus-visible lost its --text-strong hairline')
+    expect(global![0], 'global :focus-visible hairline must be scoped away from text inputs')
+      .toMatch(/:not\(input\)/)
+    expect(global![0], 'global :focus-visible hairline must be scoped away from contenteditables')
+      .toMatch(/:not\(\[contenteditable\]\)/)
+    expect(global![2], 'global :focus-visible lost its accent outline').toMatch(/outline:\s*2px solid var\(--accent\)/)
+    expect(global![2], 'global :focus-visible lost its --text-strong hairline')
       .toMatch(/box-shadow:[^;}]*var\(--text-strong\)/)
 
     // The shared utilities and the primitive each carry the opaque hairline.
@@ -119,6 +127,8 @@ describe('every keyboard focus cue clears 3:1 non-text contrast in every theme',
       .toMatch(/\.focus-ring-accent:focus-visible\{[^}]*var\(--text-strong\)[^}]*var\(--accent\)/)
     expect(ACTIVE, '.focus-ring-accent-inset utility missing or lost its hairline')
       .toMatch(/\.focus-ring-accent-inset:focus-visible\{[^}]*inset[^}]*var\(--text-strong\)[^}]*var\(--accent\)/)
+    expect(ACTIVE, '.focus-ring-accent-gap utility missing or lost its hairline')
+      .toMatch(/\.focus-ring-accent-gap:focus-visible\{[^}]*var\(--text-strong\)[^}]*var\(--accent\)/)
     expect(ACTIVE, '.focus-ring primitive lost its --text-strong hairline')
       .toMatch(/\.focus-ring:focus-visible\{[^}]*var\(--text-strong\)/)
 
@@ -179,6 +189,42 @@ describe('every keyboard focus cue clears 3:1 non-text contrast in every theme',
       offenders,
       'focus-visible:ring-accent is the accent-only ring that fails 1.4.11 in three light themes; ' +
         'use the shared `focus-ring-accent` utility instead (issue #4428):\n' + offenders.join('\n'),
+    ).toEqual([])
+  })
+
+  it('bans combining a Tailwind shadow-* utility with a .focus-ring-accent* class', () => {
+    // The focus ring is painted with `box-shadow`. A Tailwind `shadow-*` utility
+    // on the SAME element is also `box-shadow` and, living in @layer utilities,
+    // outranks the @layer-components focus-ring class -- so the ring silently
+    // reverts to the UA default (or nothing), dropping the --text-strong hairline
+    // the whole fix depends on. The per-theme contrast measurement above cannot
+    // see this (it reads index.css, not call-site class soup), so it is banned at
+    // the call site: a control that needs both a resting shadow and the accent
+    // focus ring must express the resting shadow some other way (a wrapper, or a
+    // box-shadow in its own rule that composes the ring layers).
+    const root = resolve(__dirname, '..')
+    // A className fragment that carries BOTH a focus-ring-accent* class and a
+    // bare `shadow-<name>` utility (not `shadow-none`, which paints nothing, and
+    // not a `*:shadow-*`/`hover:shadow-*` variant that does not apply at focus).
+    const FOCUS_RING = /focus-ring-accent(?:-inset|-gap)?\b/
+    const SHADOW_UTIL = /(?:^|[\s`'"{])shadow-(?!none\b)[a-z0-9[\]/.-]+/
+    const offenders: string[] = []
+    for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue
+      if (!/\.(ts|tsx)$/.test(entry.name)) continue
+      const rel = relative(root, join(entry.parentPath ?? entry.path, entry.name)).split(sep).join('/')
+      if (rel.startsWith('test/')) continue
+      if (/\.test\./.test(rel)) continue
+      const text = readFileSync(join(root, rel), 'utf8')
+      text.split('\n').forEach((line, i) => {
+        if (FOCUS_RING.test(line) && SHADOW_UTIL.test(line)) offenders.push(`${rel}:${i + 1}`)
+      })
+    }
+    expect(
+      offenders,
+      'a Tailwind shadow-* utility on the same element as a .focus-ring-accent* class ' +
+        'overrides the box-shadow focus ring and drops its --text-strong hairline (issue #4428):\n' +
+        offenders.join('\n'),
     ).toEqual([])
   })
 })

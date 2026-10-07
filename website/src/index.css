@@ -1430,8 +1430,22 @@ html:lang(ko) {
      hairline hard against the box, inside the offset accent outline, so a
      visible focus cue clears 3:1 against the surface in every theme — worst case
      6.48:1 (everforest-light). The hairline is `box-shadow`, which like
-     `outline` paints outside the border box and does not shift layout. */
-  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;box-shadow:0 0 0 1px var(--text-strong)}
+     `outline` paints outside the border box and does not shift layout.
+     SCOPE — text inputs, textareas and contenteditables are EXCLUDED from the
+     hairline. They match `:focus-visible` on a pointer click too (not just via
+     the keyboard), and the house opt-out for them is `outline-hidden`/
+     `outline-none`, which resets only `outline`, not `box-shadow`. Without the
+     `:not(...)` guard a borderless input (the chat composer
+     `LexicalComposerInput`, the docked `SearchBar`) would paint a hard
+     high-contrast rectangle on EVERY focus — contradicting the composer's
+     "the caret is the indicator" design. These controls carry their own focus
+     affordance (a border/ring colour change or the caret); the ones that want
+     the accent ring opt INTO `.focus-ring` / `.focus-ring-accent*`, which carry
+     the same hairline on `:focus-visible` and are unaffected by this exclusion. */
+  :focus-visible:not(input):not(textarea):not([contenteditable]):not([contenteditable] *){outline:2px solid var(--accent);outline-offset:2px;box-shadow:0 0 0 1px var(--text-strong)}
+  /* The excluded inputs still get the UA/accent keyboard outline but no hairline
+     box-shadow; this leaves the global default focus to the control's own cue. */
+  input:focus-visible,textarea:focus-visible,[contenteditable]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   @media(prefers-reduced-motion:reduce){*:not([data-virtuoso-scroller] *),*::before,*::after{animation-duration:0.01ms !important;animation-iteration-count:1 !important}}
   /* The rule above zeroes animation-DURATION but not animation-DELAY, and both
      `animate-rise` and `animate-chip-hop` use fill-mode `backwards` — so a
@@ -2649,6 +2663,23 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
    never shifts layout. */
 .focus-ring-accent:focus-visible{outline:none;
   box-shadow:0 0 0 1px var(--text-strong),0 0 0 3px var(--accent)}
+/* A control that marks SELECTION with its own `ring-1 ring-accent ring-offset-1`
+   (the colour swatches in `TagManagerList`) loses that selection cue while it
+   is keyboard-focused, because `.focus-ring-accent`'s `box-shadow` replaces the
+   Tailwind ring. Re-add the selection as an OUTER layer beyond the focus band
+   so a focused + selected swatch still reads as chosen: 1px gap (`--bg`) then a
+   2px `--accent` selection ring outside the 3px focus band. `aria-pressed=true`
+   is the selected state the swatch sets. */
+.focus-ring-accent[aria-pressed="true"]:focus-visible{
+  box-shadow:0 0 0 1px var(--text-strong),0 0 0 3px var(--accent),
+             0 0 0 4px var(--bg),0 0 0 6px var(--accent)}
+/* Gap variant: a 1px `--bg` gap between the control edge and the hairline, for
+   a BORDERED option whose pre-migration cue carried `ring-offset-1
+   ring-offset-bg` (the `SessionPulseSurveyCard` rating options). The gap keeps
+   the ring from sitting flush against the option's own border. The hairline and
+   accent band shift out by 1px; the hairline still carries the 3:1 floor. */
+.focus-ring-accent-gap:focus-visible{outline:none;
+  box-shadow:0 0 0 1px var(--bg),0 0 0 2px var(--text-strong),0 0 0 4px var(--accent)}
 /* Inset variant for a scroll region flush inside an `overflow-hidden` box (the
    completion / compaction / workflow card digests), where an outset ring would
    be clipped. `inset` draws the same two layers INSIDE the content edge. */

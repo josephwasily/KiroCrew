@@ -34,7 +34,10 @@ const ACTIVE_CSS = readFileSync(INDEX_CSS_PATH, 'utf8').replace(
 
 describe('keyboard focus ring', () => {
   it('declares a global :focus-visible outline that is not commented out', () => {
-    const rule = /(?:^|[};])\s*:focus-visible\s*\{([^}]*)\}/m.exec(ACTIVE_CSS)
+    // The global rule may carry `:not(...)` exclusions (text inputs, textareas
+    // and contenteditables are scoped out of the hairline — see index.css and
+    // focusRingContrast.test.ts), so accept an optional chain of them before `{`.
+    const rule = /(?:^|[};])\s*:focus-visible(?::not\([^)]*\))*\s*\{([^}]*)\}/m.exec(ACTIVE_CSS)
     expect(
       rule,
       'no active global `:focus-visible{...}` rule in index.css — if it is ' +
