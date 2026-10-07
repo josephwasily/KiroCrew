@@ -2492,7 +2492,6 @@ function ChatSidebar({
     () => (bulkModelOptions.some(m => m.name === bulkModel) ? bulkModel : ''),
     [bulkModelOptions, bulkModel],
   )
-  const bulkRunningCount = useMemo(() => localSlots.filter(s => s.running).length, [localSlots])
   // Count only slots that would actually change. Every slot left out lands in
   // a named bucket the panel renders (see partitionBulkSwitch), so the
   // "Switch N" label can be reconciled with the rows on screen.
@@ -2501,6 +2500,13 @@ function ChatSidebar({
     [localSlots, bulkModelPick, bulkSkipRunning],
   )
   const bulkAffectedCount = bulkPartition.affected
+  // Running sessions the switch could still touch. Before a pick every running
+  // session counts; after one, a running session already on the pick is in the
+  // "already use this model" line instead, so it is not counted twice.
+  const bulkRunningCount = useMemo(
+    () => (bulkModelPick ? bulkPartition.runningOffTarget : localSlots.filter(s => s.running).length),
+    [bulkModelPick, bulkPartition, localSlots],
+  )
   const bulkModelMutation = useMutation({
     // 'auto' goes on the wire verbatim (not collapsed to ''): '' doubles as the
     // "never chosen" state that every reader re-resolves to the agent template's

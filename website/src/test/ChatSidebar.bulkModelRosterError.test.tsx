@@ -303,6 +303,27 @@ describe('ChatSidebar — Switch All Sessions already-on-target line (#11103)', 
     expect(switchBtn().textContent).toBe('Switch 0 sessions')
     expect(switchBtn()).toBeDisabled()
     expect(screen.getByTestId('bulk-model-on-target').textContent).toBe('2 sessions already use this model')
+    // The running session is already on the pick, so it is not ALSO counted
+    // by the skip checkbox: the panel's numbers add up to the 2 rows.
+    expect(screen.queryByRole('checkbox', { name: /running session/ })).toBeNull()
+  })
+
+  it('counts a running session once, in the skip line or the on-target line', async () => {
+    mocks.models.mockResolvedValue(LIVE_ROSTER)
+    renderSidebar([
+      { key: 'k-a', title: 'A', running: true, messages: 1, model: 'sonnet-4.7' },
+      { key: 'k-b', title: 'B', running: true, messages: 1, model: 'opus-4.8' },
+      { key: 'k-c', title: 'C', running: false, messages: 1, model: 'opus-4.8' },
+    ])
+    await openSwitchAllPanel()
+    await waitFor(() => expect(optionIds()).toEqual(['auto', 'opus-4.8', 'sonnet-4.7']))
+    // Before a pick, every running session is skippable.
+    expect(screen.getByRole('checkbox', { name: 'Skip 2 running sessions' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('option', { name: /sonnet-4\.7/ }))
+    // 1 already on sonnet (running) + 1 running skipped + 1 to switch = 3 rows.
+    expect(screen.getByTestId('bulk-model-on-target').textContent).toBe('1 session already uses this model')
+    expect(screen.getByRole('checkbox', { name: 'Skip 1 running session' })).toBeTruthy()
+    expect(switchBtn().textContent).toBe('Switch 1 session')
   })
 
   it('shows no line when no session is on the pick', async () => {

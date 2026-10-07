@@ -10,8 +10,11 @@
  * - `onTarget`        -- already on the picked model; the backend reports
  *                        these as `unchanged`. Rendered as the
  *                        `bulk-model-on-target` line.
- * - `skippedRunning`  -- running while "Skip running sessions" is ticked.
- *                        Rendered by that checkbox's own count.
+ * - `skippedRunning`  -- running and NOT on the pick, while "Skip running
+ *                        sessions" is ticked. The checkbox label renders
+ *                        `runningOffTarget`, which is this same set whether or
+ *                        not the box is ticked, so no running session that is
+ *                        already on the pick is counted twice on screen.
  *
  * The buckets are disjoint and, with `affected`, cover every slot, in the
  * server's own order (`api_chat_slots_model` checks the model before the busy
@@ -30,6 +33,8 @@ export interface BulkSwitchPartition {
   affected: number
   onTarget: number
   skippedRunning: number
+  /** Running sessions not on the pick: what the skip checkbox counts. */
+  runningOffTarget: number
 }
 
 export function partitionBulkSwitch(
@@ -37,10 +42,11 @@ export function partitionBulkSwitch(
   pick: string,
   skipRunning: boolean,
 ): BulkSwitchPartition {
-  const out: BulkSwitchPartition = { affected: 0, onTarget: 0, skippedRunning: 0 }
+  const out: BulkSwitchPartition = { affected: 0, onTarget: 0, skippedRunning: 0, runningOffTarget: 0 }
   for (const s of slots) {
-    if ((s.model ?? '') === pick) out.onTarget++
-    else if (skipRunning && s.running) out.skippedRunning++
+    if ((s.model ?? '') === pick) { out.onTarget++; continue }
+    if (s.running) out.runningOffTarget++
+    if (skipRunning && s.running) out.skippedRunning++
     else out.affected++
   }
   return out

@@ -28,15 +28,26 @@ describe('partitionBulkSwitch', () => {
     })
   }
 
+  it('never counts a slot in both onTarget and runningOffTarget', () => {
+    // runningOffTarget is what the skip checkbox renders beside the on-target
+    // line, so an overlap would count one session twice on screen.
+    for (const s of all) {
+      const one = partitionBulkSwitch([s], PICK, true)
+      expect(one.onTarget + one.runningOffTarget).toBeLessThanOrEqual(1)
+    }
+    const p = partitionBulkSwitch(all, PICK, true)
+    expect(p.runningOffTarget).toBe(p.skippedRunning)
+  })
+
   it('puts a running slot already on the pick in onTarget, as the server does', () => {
     expect(partitionBulkSwitch([{ key: 'a', model: PICK, running: true }], PICK, true))
-      .toEqual({ affected: 0, onTarget: 1, skippedRunning: 0 })
+      .toEqual({ affected: 0, onTarget: 1, skippedRunning: 0, runningOffTarget: 0 })
   })
 
   it('counts a running off-target slot as skipped only while skipping', () => {
     const s = [{ key: 'a', model: 'sonnet-4.7', running: true }]
-    expect(partitionBulkSwitch(s, PICK, true)).toEqual({ affected: 0, onTarget: 0, skippedRunning: 1 })
-    expect(partitionBulkSwitch(s, PICK, false)).toEqual({ affected: 1, onTarget: 0, skippedRunning: 0 })
+    expect(partitionBulkSwitch(s, PICK, true)).toEqual({ affected: 0, onTarget: 0, skippedRunning: 1, runningOffTarget: 1 })
+    expect(partitionBulkSwitch(s, PICK, false)).toEqual({ affected: 1, onTarget: 0, skippedRunning: 0, runningOffTarget: 1 })
   })
 
   it('treats an unset model as on-target only for an unset pick', () => {
