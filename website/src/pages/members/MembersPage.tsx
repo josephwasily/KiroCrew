@@ -3791,8 +3791,8 @@ export default function MembersPage() {
                   >{pillActivity.label}</div>
                 </div>
                 {/* The one visible sign that this chip OPENS something. Without
-                    it the pill and the switcher chip beside it are two glass
-                    chips with faces in them, and only one of them is a door to
+                    it the pill and the switcher beside it are two controls
+                    with faces in them, and only one of them is a door to
                     the Profile. Decorative: the tooltip and `aria-expanded`
                     already say it for assistive tech. */}
                 <ChevronRight size={14} className="lucide-inline shrink-0 text-muted" aria-hidden="true" data-testid="member-identity-pill-chevron" />
