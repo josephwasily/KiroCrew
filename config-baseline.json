@@ -64,6 +64,7 @@
         "recovery_backoff_base_secs": 2.0,
         "recovery_backoff_max_secs": 120.0,
         "session_start_concurrency": "auto",
+        "child_env_defaults": {},
         "adaptive_concurrency": true,
         "adaptive_concurrency_mode": "aimd",
         "adaptive_floor": 1,
@@ -939,6 +940,34 @@
       "enumValues": null,
       "defaultValue": "auto",
       "requiresRestart": true
+    },
+    {
+      "path": "agent.child_env_defaults",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "kiro-cli Child Env Defaults",
+      "help": "Environment variables given to every spawned kiro-cli process (chat sessions, background sessions and subagents) ONLY when the variable is not already set in the environment it inherits. Empty by default. kiro-cli sizes its thread pools by core count, so on a many-core host running dozens of kiro-cli processes they can be capped, e.g. {\"TOKIO_WORKER_THREADS\": \"4\", \"RAYON_NUM_THREADS\": \"4\"}. Only TOKIO_WORKER_THREADS and RAYON_NUM_THREADS are accepted, each a decimal integer string from 1 to 1024; any other entry is ignored with a warning. Kiro Crew's own agent environment scrub still applies. Every process the agent runs (tools, MCP servers, your own programs) inherits these variables too. Takes effect on the next spawn.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {}
+    },
+    {
+      "path": "agent.child_env_defaults.*",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "*",
+      "help": "",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": null
     },
     {
       "path": "agent.adaptive_concurrency",

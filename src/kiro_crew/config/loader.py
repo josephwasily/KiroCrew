@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMappin
 from dataclasses import MISSING, asdict, dataclass, field  # noqa: F401 - loader namespace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit as _urlsplit  # noqa: F401 - compatibility facade
 
 # Module alias for post-split helpers. The `from ... import` list below is a
@@ -1816,6 +1816,61 @@ def coerce_dict_section(doc: dict, key: str) -> dict:
     return section
 
 
+def coerce_config_field(
+    section: dict,
+    key: str,
+    expected: type | tuple[type, ...],
+    default: Any,
+) -> Any:
+    """Return ``section[key]`` when it is ``expected``-typed, else ``default``.
+
+    The sibling of :func:`coerce_dict_section` for the NESTED values a raw
+    reader consumes, not the whole section. The validated loader degrades a
+    wrong-typed field to its default (see ``config.resolution._coerced_section``
+    for sections), so the dataclass view never raises on a hand-edited
+    ``config.json`` with a mistyped field. A raw reader that pulls the value
+    straight out of the parsed document has no such guard, so a non-numeric
+    ``knowledge.fetch_top_n`` reaches ``int()`` and a non-string
+    ``slack.command`` reaches a char loop — each a loud ``TypeError`` on input
+    the loader itself degrades gracefully. Routing those reads through here
+    gives them the loader's posture in one place: a wrong-typed value falls
+    back to the default and is logged, instead of taking the request down.
+
+    An ABSENT key takes the default silently — that is the ordinary
+    unconfigured state, not a degradation. ``bool`` is deliberately NOT a
+    stand-in for ``int`` here: a reader asking for an ``int`` field that finds a
+    ``bool`` gets the default, matching JSON's own type distinction.
+    """
+    if key not in section:
+        return default
+    value = section[key]
+    # ``bool`` is a subclass of ``int``; keep them distinct so an ``int``
+    # field does not silently accept ``true``/``false`` (and vice versa).
+    want_int = expected is int or (
+        isinstance(expected, tuple) and int in expected and bool not in expected
+    )
+    if want_int and isinstance(value, bool):
+        logger.warning(
+            "config: '%s' is a boolean, expected %s — using default", key, _type_names(expected)
+        )
+        return default
+    if isinstance(value, expected):
+        return value
+    logger.warning(
+        "config: '%s' is not %s (got %s) — using default; the configured value is NOT in effect",
+        key,
+        _type_names(expected),
+        type(value).__name__,
+    )
+    return default
+
+
+def _type_names(expected: type | tuple[type, ...]) -> str:
+    if isinstance(expected, tuple):
+        return " or ".join(t.__name__ for t in expected)
+    return expected.__name__
+
+
 @contextlib.contextmanager
 def _config_write_lock(p: Path, *, wait: bool = True) -> Iterator[None]:
     """Hold the sidecar advisory lock that serializes config-file writers.
@@ -3158,6 +3213,9 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         session_start_concurrency=_session_start_concurrency(
             agent_data.get("session_start_concurrency", "auto")
         ),
+        # Env defaults for spawned kiro-cli children (acp/child_env_defaults.py).
+        # Through the module alias: the loader's import list is a frozen snapshot.
+        child_env_defaults=_sections.coerce_child_env_defaults(section.get("child_env_defaults")),
         # Adaptive controller (adaptive/policy.py params_from_config).
         adaptive_concurrency=section.read("adaptive_concurrency", _safe_bool),
         adaptive_concurrency_mode=(

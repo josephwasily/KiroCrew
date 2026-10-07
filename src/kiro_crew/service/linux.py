@@ -1246,7 +1246,10 @@ class UninstallReport:
     says one runs; a refusal — an alias, an unverified ``Id``, a running unit
     under a load state other than ``loaded`` — that leaves a RUNNING unit or the
     system unit file at ``UNIT_PATH`` behind; and a unit file or link that could
-    not be removed after a successful stop. The report still carries every
+    not be removed after a successful stop; and a closing ``daemon-reload`` the
+    manager rejected (``"removed (…), but `… daemon-reload` failed: …; run it by
+    hand"``) — the file is gone but the manager still holds the old definition,
+    so the scope is not in ``removed`` until the reload takes. The report still carries every
     scope, the controller marks those lines and exits non-zero after printing
     it. A refusal that leaves nothing behind is a report and finishes the
     scope: in the user scope a unit that runs nothing and is not ours to remove
@@ -1593,20 +1596,21 @@ def _teardown_owned(owned: OwnedUnit, state: _UnitState) -> _ScopeTeardown:
         failure = _remove_owned(owned, after_verbs=True)
         if failure is not None:
             return _ScopeTeardown(failure, finished=False)
-    _finish_scope(owned)
+    reload_failure = _finish_scope(owned)
     if owned.linked:
         line = (
             f"removed (the link to {owned.definition}; the linked unit file {owned.definition} "
             f"itself was kept)"
         )
     elif not present:
+        reloaded = "" if reload_failure is not None else "; daemon-reload run"
         line = (
             f"stopped (its unit file {owned.definition} was already gone, so nothing was disabled "
-            f"or unlinked; daemon-reload run)"
+            f"or unlinked{reloaded})"
         )
     else:
         line = f"removed ({owned.definition})"
-    return _ScopeTeardown(line, removed=True)
+    return _scope_finished(line, reload_failure)
 
 
 def _remove_stale_owned(owned: OwnedUnit) -> _ScopeTeardown:
@@ -1623,24 +1627,39 @@ def _remove_stale_owned(owned: OwnedUnit) -> _ScopeTeardown:
     failure = _remove_owned(owned, after_verbs=False)
     if failure is not None:
         return _ScopeTeardown(failure, finished=False)
-    _finish_scope(owned)
+    reload_failure = _finish_scope(owned)
     if owned.linked:
-        return _ScopeTeardown(
+        line = (
             f"removed (the link to {owned.definition}; the linked unit file {owned.definition} "
-            f"itself was kept)",
-            removed=True,
+            f"itself was kept)"
         )
-    if owned.mask:
-        return _ScopeTeardown(
-            f"removed (the mask {owned.definition}; {SERVICE_NAME}.service is unmasked)",
-            removed=True,
-        )
-    return _ScopeTeardown(f"removed ({owned.definition})", removed=True)
+    elif owned.mask:
+        line = f"removed (the mask {owned.definition}; {SERVICE_NAME}.service is unmasked)"
+    else:
+        line = f"removed ({owned.definition})"
+    return _scope_finished(line, reload_failure)
 
 
-def _finish_scope(owned: OwnedUnit) -> None:
+def _scope_finished(line: str, reload_failure: str | None) -> _ScopeTeardown:
+    """A scope whose unit file is gone: removed when the closing
+    ``daemon-reload`` took; unfinished — and NOT removed — when the manager
+    refused it, since the manager still holds the old definition until someone
+    reloads it by hand, so the headline must not read ``stopped and removed``."""
+    if reload_failure is not None:
+        return _ScopeTeardown(f"{line}, but {reload_failure}", finished=False)
+    return _ScopeTeardown(line, removed=True)
+
+
+def _finish_scope(owned: OwnedUnit) -> str | None:
     """The steps after a removal: the system scope's untouched overrides seed
-    goes with the unit, and the scope's manager is told to reload."""
+    goes with the unit, and the scope's manager is told to reload.
+
+    Returns ``None`` on success, or a diagnostic string when the
+    ``daemon-reload`` exits non-zero — the manager still holds the old
+    definition until someone reloads it by hand. On a host not booted with
+    systemd (no ``/run/systemd/system``) there is no system manager, so a
+    failed system-scope reload is not a failure.
+    """
     if owned.scope == "system" and _env_file_is_untouched_seed():
         # Only when it still holds our untouched seed — proving both that we
         # wrote it and that the operator never edited it. An operator-authored
@@ -1649,7 +1668,14 @@ def _finish_scope(owned: OwnedUnit) -> None:
         # is best-effort and only clears an empty dir.
         _sudo_run("rm", "-f", str(ENV_FILE_PATH))
         _sudo_run("rmdir", str(ENV_DIR))
-    _systemctl("daemon-reload", user=owned.scope == "user")
+    user = owned.scope == "user"
+    res = _systemctl("daemon-reload", user=user)
+    if res.returncode != 0 and (user or _SYSTEMD_BOOTED_DIR.is_dir()):
+        # A host not booted with systemd has no system manager to hold the old
+        # definition, so the reload failing there leaves nothing behind.
+        reload_cmd = "systemctl --user daemon-reload" if user else "sudo systemctl daemon-reload"
+        return f"`{reload_cmd}` failed: {_first_line(res)}; run it by hand"
+    return None
 
 
 def _teardown_scope(*, user: bool) -> _ScopeTeardown:
@@ -1751,7 +1777,10 @@ def uninstall() -> UninstallReport:
 
 
 def user_unit_installed() -> bool:
-    """Whether the calling account's own manager has a ``kirocrew.service`` loaded.
+    """Whether the calling account's own manager has a ``kirocrew.service`` installed:
+    the manager answers a load state other than ``not-found`` for a unit whose
+    canonical ``Id`` is ours (``loaded``, ``masked``, ``bad-setting`` and
+    ``error`` all count; only ``not-found`` does not).
 
     The one scope question a caller outside this module needs: ``kirocrew logs``
     reads the USER journal when the gateway is the per-user unit, and that
@@ -1989,7 +2018,8 @@ def restart() -> RestartReport:
     it regardless of restart policy.
 
     The report is per scope (:class:`RestartReport`), and ``ok`` only when every
-    restarted unit is UP at the end of the settle window — not when ``systemctl``
+    restarted unit is UP — ``active`` or ``reloading``, what ``systemctl
+    is-active`` exits 0 for — at the end of the settle window, not when ``systemctl``
     exited 0: for the ``Type=simple`` unit this module renders that exit says
     the process was forked, not that it lived, so a crash-looping gateway
     restarted into ``activating (auto-restart)`` would otherwise read as

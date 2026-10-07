@@ -99,6 +99,7 @@ from kiro_crew.acp._dispatch import (
     tool_call_content_text,
 )
 from kiro_crew.acp._frame_record import record_frame
+from kiro_crew.acp.child_env_defaults import apply_child_env_defaults
 from kiro_crew.acp.harness_tool_names import (
     MAX_HARNESS_CONFIG_MCP_SERVERS,
     MAX_HARNESS_TOOL_NAME_LEN,
@@ -2581,6 +2582,11 @@ def _resolve_spawn_env(env: dict[str, str], *, kiro_api_key: bool = False) -> di
     deliberately exempts it, so an inherited copy would otherwise ride into a
     foreign agent process. The file read is IO, which is why both branches
     ride this same off-loop hop.
+
+    A kiro-cli child (``kiro_api_key=True``) also gets
+    ``agent.child_env_defaults`` for keys *env* does not already carry -- a
+    config read, so it rides this hop too. The ``AcpRuntime`` spawn applies the
+    same helper through the kiro-family harness hook instead.
     """
     _resolve_ssh_auth_sock(env)
     resolve_krb5_ccname(env)
@@ -2590,6 +2596,7 @@ def _resolve_spawn_env(env: dict[str, str], *, kiro_api_key: bool = False) -> di
 
     if kiro_api_key:
         inject_kiro_cli_api_key(env)
+        apply_child_env_defaults(env)
     else:
         strip_kiro_cli_api_key(env)
     return env

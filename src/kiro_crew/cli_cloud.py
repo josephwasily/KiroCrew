@@ -468,11 +468,15 @@ def _cloud_iam_boundary(args: argparse.Namespace) -> int:
     """Pre-create the shared, immutable instance permissions boundary (admin step).
 
     Normally the first ``launch`` auto-creates this (the launcher policy grants
-    only ``iam:CreatePolicy`` on the fixed boundary name). Operators who want to
-    eliminate the first-write race entirely run this ONCE as an admin, then drop
-    the ``IamInstanceBoundaryCreateOnce`` statement from the applied launcher
-    policy — the launcher then only *references* the boundary ARN, never creates
-    it. Idempotent: an existing boundary is left untouched (immutability).
+    ``iam:CreatePolicy`` plus the two read verbs, ``iam:GetPolicy`` and
+    ``iam:GetPolicyVersion``, on the fixed boundary names). Operators who want to
+    eliminate the first-write race entirely run this ONCE as an admin, then remove
+    the ``iam:CreatePolicy`` action from the ``IamInstanceBoundaryCreateOnce``
+    statement in the applied launcher policy — the launcher then only *references*
+    the boundary ARN, never creates it. The statement's ``iam:GetPolicy`` and
+    ``iam:GetPolicyVersion`` grants stay: every launch reads the boundary to verify
+    its content before reusing it. Idempotent: an existing boundary is left
+    untouched (immutability).
     """
     from kiro_crew.cloud import source as source_mod
 
@@ -487,8 +491,10 @@ def _cloud_iam_boundary(args: argparse.Namespace) -> int:
     ui.ok(f"Instance permissions boundary ready: {arn}")
     ui.detail(
         "It is immutable and shared by every launch. To fully close the "
-        "first-write race, remove the IamInstanceBoundaryCreateOnce statement "
-        "from the applied launcher policy now that the boundary exists."
+        "first-write race, remove the iam:CreatePolicy action from the "
+        "IamInstanceBoundaryCreateOnce statement in the applied launcher policy "
+        "now that the boundary exists. Keep the statement's read verbs — every "
+        "launch reads the boundary to verify it."
     )
     return 0
 

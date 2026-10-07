@@ -110,7 +110,7 @@ describe('LexicalComposerInput', () => {
       value: { getData: (type: string) => type === 'text/plain' ? payload : '', types: ['text/plain'] },
     })
     await dispatchAtEnd(editorRef.current!, PASTE_COMMAND, event)
-    await waitFor(() => expect(screen.getByTestId('value').textContent).toMatch(/\[ Paste #1 · 4 lines \]/))
+    await waitFor(() => expect(screen.getByTestId('value').textContent).toMatch(/\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 4 lines \]/))
     expect(screen.getByTestId('blocks').textContent).toContain(payload.replaceAll('\n', '\\n'))
     expect(screen.getByTestId('paste-token-1')).toBeInTheDocument()
   })

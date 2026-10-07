@@ -4,9 +4,18 @@ import { mergeRecoveredDraft } from './chatDrafts'
  * Paste-token utilities.
  *
  * Large pastes into the chat input are collapsed into inline tokens of the
- * form `⌜ Paste #N · M lines ⌟` so the textarea stays readable. The sequence
- * number N is unique within the current input session and drives reliable
- * pairing between a token occurrence in text and its backing PasteBlock.
+ * form `⌜ Paste #N · M lines ⌟` so the textarea stays readable. Pairing a
+ * token occurrence in text to its backing PasteBlock is by the block's stable
+ * `id`, carried in the token as an ENTIRELY INVISIBLE run of zero-width code
+ * points right after `#N` (see {@link encodeIdInvisible}). Every character of
+ * the carried id is zero-width, so the token renders byte-for-byte as
+ * `[ Paste #N · M lines ]` to the user — nothing of the id is visible — while
+ * the regex still recovers a durable key. `seq` restarts at 1 once a send
+ * clears the blocks, so it is a display number only, never the addressing key.
+ *
+ * Legacy tokens in the old `#N`-only form (no invisible id) are still resolved
+ * by seq as a migration fallback, so sent transcripts, per-slot drafts and the
+ * paste-draft store written before this change keep working.
  *
  * Seq numbers are stable once assigned — if the user deletes token #2 and
  * pastes again, the new block is assigned a fresh seq (max+1), not renumbered.
@@ -14,8 +23,8 @@ import { mergeRecoveredDraft } from './chatDrafts'
 
 /** A collapsed paste block stored alongside the input/message. */
 export interface PasteBlock {
-  id: string       // unique id (React key; not embedded in token text)
-  seq: number      // monotonic per-session number visible in the token (`#N`)
+  id: string       // unique id (React key AND the token's invisible addressing key)
+  seq: number      // display-only per-session number visible in the token (`#N`)
   lines: number    // line count displayed in the token (`M lines`)
   content: string  // original pasted text
 }
@@ -23,11 +32,62 @@ export interface PasteBlock {
 export const PASTE_THRESHOLD_LINES = 3
 export const PASTE_THRESHOLD_CHARS = 200
 
-/** Global regex for extracting token occurrences. (1)=seq, (2)=lines. */
-export const PASTE_TOKEN_REGEX = /\[ Paste #(\d+) · (\d+) lines \]/g
+// Zero-width code points used to carry the id invisibly. All three render as
+// nothing and have zero advance width, so the token the user reads is
+// unchanged, and they survive the app's own round-trips (localStorage drafts,
+// the sent transcript, re-collapse). The id bits ride on U+200B (ZERO WIDTH
+// SPACE = bit 0) and U+200C (ZERO WIDTH NON-JOINER = bit 1); U+2063 (INVISIBLE
+// SEPARATOR) fences the run so the regex can bound it unambiguously. The run
+// sits right after `#N` and before ` · M lines ]`, never trailing, so
+// trailing-whitespace trimming never touches it.
+const PASTE_ID_FENCE = '\u2063'
+const PASTE_ID_BIT0 = '\u200b'
+const PASTE_ID_BIT1 = '\u200c'
+
+/** Encode an ASCII id as a fenced, fully zero-width run: each char's code point
+ *  (0–127) as 7 bits MSB-first over {@link PASTE_ID_BIT0}/{@link PASTE_ID_BIT1},
+ *  wrapped in {@link PASTE_ID_FENCE}. `makePasteId` emits base-36 (`[a-z0-9]`),
+ *  all ASCII. Returns '' for an empty id so the token stays legacy-shaped. */
+export function encodeIdInvisible(id: string): string {
+  if (!id) return ''
+  let bits = ''
+  for (let i = 0; i < id.length; i++) {
+    const code = id.charCodeAt(i) & 0x7f
+    for (let b = 6; b >= 0; b--) bits += (code >> b) & 1 ? PASTE_ID_BIT1 : PASTE_ID_BIT0
+  }
+  return `${PASTE_ID_FENCE}${bits}${PASTE_ID_FENCE}`
+}
+
+/** Inverse of {@link encodeIdInvisible}: decode a bare bit run (no fences) back
+ *  to the ASCII id. Returns '' when the run is not a whole number of 7-bit
+ *  groups (corruption) so a malformed token resolves to nothing rather than a
+ *  wrong block. */
+export function decodeIdInvisible(bits: string): string {
+  if (!bits || bits.length % 7 !== 0) return ''
+  let out = ''
+  for (let i = 0; i < bits.length; i += 7) {
+    let code = 0
+    for (let b = 0; b < 7; b++) {
+      const ch = bits[i + b]
+      if (ch === PASTE_ID_BIT1) code = (code << 1) | 1
+      else if (ch === PASTE_ID_BIT0) code = code << 1
+      else return ''
+    }
+    out += String.fromCharCode(code)
+  }
+  return out
+}
+
+/**
+ * Global regex for token occurrences. (1)=seq, (2)=the invisible id bit run
+ * (optional — absent on legacy `#N`-only tokens), (3)=lines. The id run sits
+ * between two U+2063 fences right after `#N`; the fences are matched but not
+ * captured. Decode group 2 with {@link decodeIdInvisible}.
+ */
+export const PASTE_TOKEN_REGEX = /\[ Paste #(\d+)(?:\u2063([\u200b\u200c]+)\u2063)? · (\d+) lines \]/g
 
 export function formatToken(block: PasteBlock): string {
-  return `[ Paste #${block.seq} · ${block.lines} lines ]`
+  return `[ Paste #${block.seq}${encodeIdInvisible(block.id)} · ${block.lines} lines ]`
 }
 
 export function shouldCollapse(text: string): boolean {
@@ -127,8 +187,13 @@ export function carryPastes(text: string, carried: PasteBlock[], kept: PasteBloc
   const keptIds = new Set(kept.map(b => b.id))
   const fresh = carried.filter(b => !keptIds.has(b.id))
   let payload = text
-  // A token resolves by seq, so only a seq no fresh carried block also claims
-  // can be attributed to a held block with certainty.
+  // Strip a held block's token from the payload so the composer never shows it
+  // twice. A new-form token carries the block id, so the strip below resolves
+  // it precisely. A LEGACY token (`#N`, no id) can only match by seq and is
+  // ambiguous when a fresh carried block shares that seq — attributing it to
+  // the held block would wrongly swallow the fresh one's token, so a held block
+  // whose seq a fresh block also claims is left in place (its legacy token then
+  // flows through the re-sequencing path with the fresh blocks).
   const freshSeqs = new Set(fresh.map(b => b.seq))
   const held = carried.filter(b => keptIds.has(b.id) && !freshSeqs.has(b.seq))
   if (held.length) {
@@ -163,19 +228,52 @@ export function mergeCarriedDraft(keep: string | null | undefined, carried: Carr
   return mergeRecoveredDraft(existing, carried.text)
 }
 
-/** Ranges for each token whose seq is present in `blocks`, in document order. */
+/**
+ * Ranges for each token that resolves to a block in `blocks`, in document order.
+ *
+ * A token is resolved by its invisible `id` fence when present — the primary
+ * key — so a recalled message's token for block A never resolves to a different
+ * draft's block B even when both display `#1` (seq restarts at 1 after a send).
+ * A new-form token whose id names no live block does NOT resolve; it stays
+ * literal text rather than mis-pairing.
+ *
+ * A legacy token with no id fence (`#N`, written before id-addressing) falls
+ * back to `seq`, but only when exactly one live block owns that seq. Several
+ * live blocks sharing the seq make a bare legacy token ambiguous, so it is left
+ * unresolved rather than guessed — guessing is the wrong-content splice this
+ * change exists to prevent.
+ */
 export function findTokenRanges(
   text: string,
   blocks: PasteBlock[],
 ): Array<{ start: number; end: number; block: PasteBlock }> {
   if (!text || !blocks.length) return []
-  const bySeq = new Map(blocks.map(b => [b.seq, b]))
+  const byId = new Map(blocks.map(b => [b.id, b]))
+  const bySeq = new Map<number, PasteBlock[]>()
+  for (const b of blocks) {
+    const arr = bySeq.get(b.seq)
+    if (arr) arr.push(b); else bySeq.set(b.seq, [b])
+  }
   const out: Array<{ start: number; end: number; block: PasteBlock }> = []
   PASTE_TOKEN_REGEX.lastIndex = 0
   let m: RegExpExecArray | null
   while ((m = PASTE_TOKEN_REGEX.exec(text)) !== null) {
-    const seq = Number(m[1])
-    const block = bySeq.get(seq)
+    let block: PasteBlock | undefined
+    if (m[2] !== undefined) {
+      // The token carries a fenced id run. Resolve by the decoded id ONLY — a
+      // run that decodes to nothing (corrupted/garbled, e.g. clipboard text
+      // altered outside the app) must stay unresolved, NOT fall back to seq:
+      // the seq fallback could pair it to a live same-seq block and splice that
+      // block's content in. The seq fallback is for LEGACY tokens that never
+      // carried an id, which is `m[2] === undefined`.
+      const id = decodeIdInvisible(m[2])
+      if (id) block = byId.get(id)
+    } else {
+      // Legacy `#N`-only token (no id run): resolve by seq, but only when
+      // exactly one live block owns it; an ambiguous seq is left unresolved.
+      const candidates = bySeq.get(Number(m[1]))
+      if (candidates && candidates.length === 1) block = candidates[0]
+    }
     if (block) out.push({ start: m.index, end: m.index + m[0].length, block })
   }
   return out

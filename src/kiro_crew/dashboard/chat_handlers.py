@@ -9296,6 +9296,20 @@ async def api_recent_projects(request: web.Request) -> web.Response:
 _STRUCTURED_CONTENT_MAX_CHARS = 20_000_000
 _STRUCTURED_CONTENT_PLACEHOLDER = "[unsupported structured content removed]"
 
+#: Extra off-loop re-reads a resume gives its OWN post-reopen metadata reads
+#: (the ``clear_closed`` verification read and the final identity re-read) when
+#: they come back unreadable. Those reads open a file this resume just rewrote,
+#: and on Windows a just-written file is briefly unopenable while an indexer or
+#: AV scanner holds it; on a loaded runner that hold can outlast
+#: ``get_metadata_status``'s own bounded retry. An unreadable read stays
+#: fail-closed (the handler refuses, never publishes blind), so these extra
+#: tries only widen the window the transient has to clear before that refusal —
+#: they never accept an unreadable line. Sized well above the few-ms transient
+#: without stalling a genuinely-gone or corrupt line for long: 8 tries at 25 ms
+#: is a 200 ms ceiling, paid only on the rare unreadable path.
+_REOPEN_REREAD_EXTRA_ATTEMPTS = 8
+_REOPEN_REREAD_RETRY_SECS = 0.025
+
 
 class ResumeRefusal(NamedTuple):
     """One refusal of :func:`resume_slot_from_history`, shaped for the wire.

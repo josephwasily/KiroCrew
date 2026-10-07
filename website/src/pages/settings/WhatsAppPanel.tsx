@@ -408,6 +408,16 @@ export function WhatsAppPanel() {
       setQrImg('')
       return
     }
+    // The server withholds a code once WhatsApp would reject it. Without this
+    // arm the previous image stays rendered,
+    // since the line below only ever REPLACES it, and the operator scans a dead
+    // code under a spinner that never ends.
+    if (qrStatus.qr_expired) {
+      setErrMsg(qrStatus.detail || '')
+      setPhase('expired')
+      setQrImg('')
+      return
+    }
     if (qrStatus.qr_data_url) setQrImg(qrStatus.qr_data_url)
   }, [qrStatus, polling, qc])
 
@@ -795,8 +805,11 @@ export function WhatsAppPanel() {
         )}
 
         {phase === 'expired' && (
-          <div className="mt-3 flex items-center gap-1.5 text-[12.5px] text-warn" data-testid="whatsapp-expired">
-            <TriangleAlert size={13} /> {i18nT('pages.settings.whatsAppPanel.the_code_expired_try_again')}
+          <div className="mt-3 text-[12.5px] text-warn" data-testid="whatsapp-expired">
+            <div className="flex items-center gap-1.5">
+              <TriangleAlert size={13} /> {i18nT('pages.settings.whatsAppPanel.the_code_expired_try_again')}
+            </div>
+            {errMsg && <div className="mt-1" data-testid="whatsapp-expired-detail">{errMsg}</div>}
           </div>
         )}
 

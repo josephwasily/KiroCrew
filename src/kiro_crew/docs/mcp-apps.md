@@ -310,7 +310,7 @@ app HTML is **server-controlled code running in your dashboard**.
 - **Missing, corrupt, or oversized spool files are tolerated**, so a bad payload
   cannot crash a turn.
 - **The dashboard CSP allows `https://esm.sh`.** `srcdoc` iframes inherit the parent's CSP header, and apps commonly load their module graph from esm.sh via importmap — without that allowance the app's scripts never execute and you get a blank frame.
-- **Per-app CSP is additive and sanitized.** Resource metadata can request `resourceDomains`, `connectDomains`, `frameDomains`, and `baseUriDomains`; the host accepts only `https://` origin tokens, emits a CSP meta tag before app HTML, and otherwise starts from a deny-by-default policy. The parent response CSP can only further restrict that policy.
+- **Per-app CSP is additive and sanitized.** Resource metadata can request `resourceDomains`, `connectDomains`, `frameDomains`, and `baseUriDomains`; the host accepts only `https://` origin tokens, emits a CSP meta tag before app HTML, and otherwise starts from a deny-by-default policy. Web Workers created from `blob:` URLs are always allowed (`worker-src 'self' blob:`); remote worker scripts are not. The parent response CSP can only further restrict that policy.
 - The host declares a limited capability set to the app (`serverTools`,
   `openLinks`). Link opening is gated to `https://` only.
 

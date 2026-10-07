@@ -139,14 +139,21 @@ def _doctor_credentials(issues: list[str]) -> None:
         # verdicts cannot change between them, and a second probe would only risk
         # the two lines disagreeing with each other.
         #
-        # "Could not ask" has exactly three causes, and each needs its own
+        # "Could not ask" has exactly four causes, and each needs its own
         # sentence, because every one of them makes a DIFFERENT statement true:
-        # no CLI on the host, a CLI the path checks refuse, and a CLI that
-        # resolved and then would not run. Collapsing any of them onto "install
-        # the AWS CLI" tells an operator who has one to install it -- the same
-        # confident wrong answer this section was opened to remove.
+        # no CLI on the host, a CLI the path checks refuse, a CLI on PATH that
+        # lives outside the trusted directories altogether (the per-user
+        # Windows install), and a CLI that resolved and then would not
+        # run. Collapsing any of them onto "install the AWS CLI" tells an
+        # operator who has one to install it -- the same confident wrong answer
+        # this section was opened to remove.
         declined_cli = cli_doctor.platform_compat.aws_bin_declined_on_ownership()
         resolved_cli = cli_doctor.platform_compat.trusted_aws_bin()
+        outside_cli = (
+            None
+            if declined_cli or resolved_cli
+            else cli_doctor.platform_compat.tool_outside_trusted_dirs("aws")
+        )
         profiles = cli_doctor._aws_profile_names()
         if profiles:
             shown = ", ".join(render._safe_display(name) for name in profiles[:6])
@@ -164,6 +171,18 @@ def _doctor_credentials(issues: list[str]) -> None:
             elif resolved_cli:
                 print(
                     f"  profiles:    ℹ️  ~/.aws present; {render._safe_display(resolved_cli)} did not answer, so the profile set is unknown"
+                )
+            elif outside_cli:
+                # Present on PATH, but outside the trusted system directories
+                # (the per-user AWS CLI v2 install on Windows). Not run, by
+                # policy -- so the remediation is where to install it, not
+                # whether to.
+                print(
+                    f"  profiles:    ℹ️  ~/.aws present; {render._safe_display(outside_cli)} is outside the trusted system directories, so it is not run"
+                )
+                render._print_wrapped(
+                    "install the AWS CLI system-wide (an elevated, machine-wide install on "
+                    "Windows) if you want doctor to list profiles."
                 )
             else:
                 print("  profiles:    ℹ️  ~/.aws present; install the AWS CLI to list profiles")
@@ -188,6 +207,10 @@ def _doctor_credentials(issues: list[str]) -> None:
             elif resolved_cli:
                 print(
                     f"  refresh:     ℹ️  {render._safe_display(resolved_cli)} did not answer — credential_process not established"
+                )
+            elif outside_cli:
+                print(
+                    f"  refresh:     ℹ️  {render._safe_display(outside_cli)} is outside the trusted system directories — not asked about credential_process"
                 )
             else:
                 print("  refresh:     ℹ️  install the AWS CLI to check for credential_process")

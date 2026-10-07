@@ -197,6 +197,34 @@ describe('WhatsAppPanel — pairing', () => {
     })
   })
 
+  it('clears a code the gateway says has expired instead of keeping it up', async () => {
+    // The image is only ever replaced by a newer code, so without a clearing
+    // arm a code the server stops serving stays on screen under the spinner.
+    seed({ connected: false, state: 'pairing' })
+    const status = vi.spyOn(api, 'whatsAppQrStatus').mockResolvedValue({
+      state: 'pairing',
+      qr_data_url: 'data:image/png;base64,AAAA',
+      qr_expired: false,
+      detail: '',
+    })
+    vi.spyOn(api, 'whatsAppQrStart').mockResolvedValue({ ok: true, state: 'pairing' })
+    renderWithProviders(<WhatsAppPanel />)
+    const button = await screen.findByRole('button', { name: /Show pairing code/ })
+    await waitFor(() => expect(button).toBeEnabled())
+    fireEvent.click(button)
+    await waitFor(() => expect(document.querySelector('img[src^="data:image/png"]')).not.toBeNull())
+
+    status.mockResolvedValue({
+      state: 'pairing',
+      qr_data_url: null,
+      qr_expired: true,
+      detail: 'the pairing code expired without being scanned; restart the gateway to get a new code',
+    })
+    expect(await screen.findByTestId('whatsapp-expired', {}, { timeout: 4000 })).toBeInTheDocument()
+    expect(document.querySelector('img[src^="data:image/png"]')).toBeNull()
+    expect(screen.getByTestId('whatsapp-expired-detail')).toHaveTextContent(/restart the gateway/)
+  })
+
   it('does not offer a code the gateway cannot produce', async () => {
     // Pairing is started by the channel's own connect(), so with no live code
     // there is nothing a click could do. The panel must say so instead.

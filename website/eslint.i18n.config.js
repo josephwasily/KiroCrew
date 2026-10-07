@@ -1557,4 +1557,31 @@ export default [
       'i18next/no-literal-string': 'off',
     },
   },
+
+  // PASTE-TOKEN FORMAT ONLY, same "format IS the interface" category as
+  // `scrollInspector.ts` above: the one words-shaped literal in this module is
+  // `formatToken`'s `[ Paste #N · M lines ]` serialization (which also carries
+  // the block's stable id between two invisible U+2063 fences). It is a protocol
+  // token embedded verbatim in composer/message text and matched back by
+  // `PASTE_TOKEN_REGEX`; translating it would break that round-trip — the regex
+  // would stop recognising the token and the paste would be sent as literal
+  // text. The chip label the USER reads is a separate, translated string
+  // (`i18nT('components.pastedChip.paste_lines', …)`) rendered by the chip
+  // components; this module renders nothing (no JSX, no i18nT, pure
+  // serialization plus the localStorage side-table) and holds no other prose.
+  // The file passed the gate until #13851 touched `formatToken` to add the
+  // stable id, which moved the long-standing literal onto a line this branch
+  // wrote; [added-lines] then charged a format string that was never copy.
+  //
+  // Scoped to this one file for the reason the exemptions above are: a
+  // `words.exclude` shape for the token's `[ Paste #` / ` lines ]` quasis would
+  // also release that prose anywhere else in the tree. Copy added here later
+  // belongs in the catalog, not under this exemption; keep this module
+  // serialization-only.
+  {
+    files: ['src/utils/pasteTokens.ts'],
+    rules: {
+      'i18next/no-literal-string': 'off',
+    },
+  },
 ]

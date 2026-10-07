@@ -307,6 +307,16 @@ def _paste_mock_state(captured_prompt, reply_text):
     return mock_state
 
 
+def _invisible_id(id_: str) -> str:
+    """Mirror pasteTokens.ts encodeIdInvisible: each ASCII char as 7 bits
+    MSB-first over U+200b (0) / U+200c (1), fenced by two U+2063 separators.
+    Lets a backend test build the exact zero-width id run the frontend emits."""
+    bits = "".join(
+        ("\u200c" if (ord(ch) >> b) & 1 else "\u200b") for ch in id_ for b in range(6, -1, -1)
+    )
+    return f"\u2063{bits}\u2063"
+
+
 class TestPasteSeqs:
     """Placeholder-seq extraction from draft/rewrite text."""
 
@@ -322,6 +332,27 @@ class TestPasteSeqs:
         from kiro_crew.dashboard.handlers.optimizer import _paste_seqs
 
         assert _paste_seqs("no pastes here") == set()
+
+    def test_extracts_seq_from_id_bearing_tokens(self):
+        # The frontend (pasteTokens.ts formatToken) carries the block's stable
+        # id right after "#N" as an ENTIRELY zero-width run — U+200b/U+200c bits
+        # fenced by two U+2063 INVISIBLE SEPARATORs — so a recalled token pairs
+        # to its own block. The run is invisible and must not stop the backend
+        # from scoping paste content by seq. New-form and legacy tokens mix here.
+        from kiro_crew.dashboard.handlers.optimizer import _paste_seqs
+
+        new_form = f"look at [ Paste #1{_invisible_id('mg4kx2a7ab')} · 40 lines ]"
+        legacy = "and [ Paste #2 · 3 lines ]"
+        assert _paste_seqs(f"{new_form} {legacy}") == {"1", "2"}
+
+    def test_token_counts_match_the_exact_id_bearing_string(self):
+        # The multiset guard keys on the FULL token string, which includes the
+        # invisible id run; it must count the id-bearing token the frontend
+        # substitutes back, or an unchanged draft would read as a dropped token.
+        from kiro_crew.dashboard.handlers.optimizer import _paste_token_counts
+
+        token = f"[ Paste #1{_invisible_id('mg4kx2a7ab')} · 5 lines ]"
+        assert _paste_token_counts(f"see {token} and {token}") == {token: 2}
 
 
 class TestBuildPastedContentBlock:

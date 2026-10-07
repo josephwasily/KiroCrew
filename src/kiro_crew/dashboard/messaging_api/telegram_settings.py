@@ -133,6 +133,7 @@ async def _telegram_config_save_locked(request: web.Request) -> web.Response:
     from kiro_crew.config.loader import (  # noqa: F811
         CRED_TELEGRAM_BOT_TOKEN,
         ConfigReadError,
+        coerce_config_field,
         config_path,
     )
 
@@ -239,7 +240,7 @@ async def _telegram_config_save_locked(request: web.Request) -> web.Response:
             uid = int(s)
             if uid not in new_ids:
                 new_ids.append(uid)
-        if new_ids != list(tg_cfg.get("allowed_user_ids", [])):
+        if new_ids != list(coerce_config_field(tg_cfg, "allowed_user_ids", list, [])):
             staged["allowed_user_ids"] = new_ids
             applied.append("allowed_user_ids")
 
@@ -322,7 +323,7 @@ async def _telegram_config_save_locked(request: web.Request) -> web.Response:
             cid = int(s)
             if cid not in new_chat_ids:
                 new_chat_ids.append(cid)
-        if new_chat_ids != list(tg_cfg.get("allowed_forum_chat_ids", [])):
+        if new_chat_ids != list(coerce_config_field(tg_cfg, "allowed_forum_chat_ids", list, [])):
             staged["allowed_forum_chat_ids"] = new_chat_ids
             applied.append("allowed_forum_chat_ids")
 

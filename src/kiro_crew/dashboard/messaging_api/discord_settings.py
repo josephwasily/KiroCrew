@@ -133,6 +133,7 @@ async def _discord_config_save_locked(request: web.Request) -> web.Response:
     from kiro_crew.config.loader import (  # noqa: F811
         CRED_DISCORD_BOT_TOKEN,
         ConfigReadError,
+        coerce_config_field,
         config_path,
     )
 
@@ -232,7 +233,7 @@ async def _discord_config_save_locked(request: web.Request) -> web.Response:
                 return _deny(f"invalid Discord user ID: {s} (numeric IDs only)")
             if s not in new_ids:
                 new_ids.append(s)
-        if new_ids != [str(u) for u in dc_cfg.get("allowed_user_ids", [])]:
+        if new_ids != [str(u) for u in coerce_config_field(dc_cfg, "allowed_user_ids", list, [])]:
             staged["allowed_user_ids"] = new_ids
             applied.append("allowed_user_ids")
 
@@ -249,7 +250,7 @@ async def _discord_config_save_locked(request: web.Request) -> web.Response:
                 return _deny(f"invalid Discord thread ID: {s} (numeric IDs only)")
             if s not in new_ids:
                 new_ids.append(s)
-        if new_ids != [str(t) for t in dc_cfg.get("allowed_thread_ids", [])]:
+        if new_ids != [str(t) for t in coerce_config_field(dc_cfg, "allowed_thread_ids", list, [])]:
             staged["allowed_thread_ids"] = new_ids
             applied.append("allowed_thread_ids")
 
@@ -266,7 +267,9 @@ async def _discord_config_save_locked(request: web.Request) -> web.Response:
                 return _deny(f"invalid Discord channel ID: {s} (numeric IDs only)")
             if s not in new_ids:
                 new_ids.append(s)
-        if new_ids != [str(c) for c in dc_cfg.get("allowed_channel_ids", [])]:
+        if new_ids != [
+            str(c) for c in coerce_config_field(dc_cfg, "allowed_channel_ids", list, [])
+        ]:
             staged["allowed_channel_ids"] = new_ids
             applied.append("allowed_channel_ids")
 

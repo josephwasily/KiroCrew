@@ -231,6 +231,66 @@ def test_a_plumbing_failure_still_writes_the_governance_passes(
     assert agent._fork_refresh_failed == frozenset()
 
 
+def test_dashboard_author_file_is_installers_is_fail_closed_on_an_unreadable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GPT 6.1 F2: a user-owned dashboard-author ``.md`` with a JSON crew fork leaves no
+    readable ``.json`` origin, so the capped reader returns ``None``. The predicate must be
+    FAIL-CLOSED -- a ``None`` spec is NOT confirmed ours, so it returns False and the fork
+    refresh leaves the fork's custom ``preToolUse`` guards in place rather than replacing
+    them with bundled hooks. A ``.json`` that reproduces the installer-recorded ownership
+    digest still returns True."""
+    from kiro_crew import agent_state
+
+    monkeypatch.setattr(agent, "kiro_agents_dir_path", lambda: tmp_path)
+    absent = tmp_path / "kirocrew-dashboard-author.json"
+    # Absent / unreadable -> capped reader returns None -> NOT ours.
+    assert fork_refresh._dashboard_author_file_is_installers(absent) is False
+    # A user file with no recorded ownership digest -> NOT ours.
+    managed = {"name": "kirocrew-dashboard-author", "mcpServers": {"kirocrew-core": {}}}
+    absent.write_text(json.dumps(managed), encoding="utf-8")
+    assert fork_refresh._dashboard_author_file_is_installers(absent) is False
+    # Record the ownership digest of these exact bytes -> now ours (reproduces the digest).
+    absent.write_text(json.dumps(managed, indent=2) + "\n", encoding="utf-8")
+    agent_state.set_managed_digest("kirocrew-dashboard-author", agent_state.spec_digest(managed))
+    assert fork_refresh._dashboard_author_file_is_installers(absent) is True
+    # A hand-edit after recording changes the bytes -> digest mismatch -> NOT ours.
+    edited = dict(managed, prompt="user hand-edit")
+    absent.write_text(json.dumps(edited, indent=2) + "\n", encoding="utf-8")
+    assert fork_refresh._dashboard_author_file_is_installers(absent) is False
+
+
+def test_a_fork_of_an_unconfirmed_dashboard_author_origin_is_not_plumbing_refreshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dashboard-author stem was a user-creatable template name before it became owned,
+    so a fork can descend from a USER template at that stem. ``_origin_is_owned`` treats it
+    as an owned origin (and refreshes the fork's hooks/MCP plumbing) ONLY when the sidecar
+    confirms the origin spec is ours; an unconfirmed origin leaves the fork's plumbing
+    untouched -- a corroborated fork still gets its governance passes."""
+    name = "kirocrew-dashboard-author"
+    _forks(monkeypatch, {"crewfork": {"private_to": "crew", "forked_from": name}})
+    _bindings(monkeypatch, {"crew": "crewfork"})
+    monkeypatch.setattr(agent, "kiro_agents_dir_path", lambda: tmp_path)
+    spec = tmp_path / "crewfork.json"
+    spec.write_text(json.dumps({"name": "crewfork", "tools": [], "allowedTools": []}))
+    monkeypatch.setattr(agent, "agent_spec_path", lambda _name: spec)
+    plumbed: list[str] = []
+    monkeypatch.setattr(agent, "_refresh_dynamic_fields", lambda config, *a, **k: plumbed.append(1))
+    monkeypatch.setattr(agent, "_atomic_json_write", lambda _p, _c: None)
+
+    # Origin NOT confirmed -> no plumbing refresh (the fork's hooks/MCP are left alone).
+    monkeypatch.setattr(fork_refresh, "_dashboard_author_file_is_installers", lambda p: False)
+    agent._refresh_forked_templates_locked(gated_off=frozenset())
+    assert plumbed == []
+    assert agent._fork_refresh_failed == frozenset()  # governance still ran; fork not blocked
+
+    # Origin confirmed ours -> plumbing refresh runs.
+    monkeypatch.setattr(fork_refresh, "_dashboard_author_file_is_installers", lambda p: True)
+    agent._refresh_forked_templates_locked(gated_off=frozenset())
+    assert plumbed == [1]
+
+
 def test_the_settled_event_stays_cleared_for_the_whole_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -258,3 +318,43 @@ def test_the_settled_event_stays_cleared_for_the_whole_pass(
     assert not first.is_alive()
     assert fork_refresh._fork_refresh_settled.is_set()
     assert agent._fork_refresh_pending == 0
+
+
+def test_an_unconfirmed_private_copy_at_the_dashboard_author_stem_is_governance_filtered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4: a fork NAMED AT the dashboard-author stem (a pre-upgrade private copy) has no
+    owned writer re-filtering it unless the managed install would actually LAND on it. The
+    loop must NOT skip it as "owned" when the install would be refused (no confirmation, or a
+    blocking ``.md`` sibling) -- it must run the governance passes, so a grant the ceiling
+    later tightened against is stripped rather than left live. When the install WOULD land,
+    the owned installer handles it and the loop skips it."""
+    name = fork_refresh._DASHBOARD_AUTHOR_STEM
+    from kiro_crew.agent_materialization import worker_agent
+
+    # The fork's OWN name equals the owned stem (a private copy at that filename), corroborated.
+    _forks(monkeypatch, {name: {"private_to": "crew", "forked_from": name}})
+    _bindings(monkeypatch, {"crew": name})
+    monkeypatch.setattr(agent, "kiro_agents_dir_path", lambda: tmp_path)
+    spec = tmp_path / (name + ".json")
+    spec.write_text(
+        json.dumps({"name": name, "tools": [], "allowedTools": ["@kirocrew-core/some_verb"]})
+    )
+    monkeypatch.setattr(agent, "agent_spec_path", lambda _n: spec)
+    monkeypatch.setattr(agent, "_refresh_dynamic_fields", lambda *_a, **_k: None)
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(agent, "_atomic_json_write", lambda _p, config: written.append(config))
+
+    # Install would NOT land (refused: unconfirmed, or a blocking .md) -> NOT skipped as
+    # owned; governance runs and the config is written (re-filtered).
+    monkeypatch.setattr(worker_agent, "_managed_dashboard_author_install_lands", lambda p: False)
+    agent._refresh_forked_templates_locked(gated_off=frozenset())
+    assert [c["name"] for c in written] == [name], "unconfirmed stem copy must be filtered"
+    assert agent._fork_refresh_failed == frozenset()
+
+    # Install WOULD land -> the owned installer owns it; the loop skips it.
+    written.clear()
+    monkeypatch.setattr(worker_agent, "_managed_dashboard_author_install_lands", lambda p: True)
+    agent._refresh_forked_templates_locked(gated_off=frozenset())
+    assert written == [], "a confirmed-owned stem spec is left to its owned writer"
+    assert agent._fork_refresh_failed == frozenset()

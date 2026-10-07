@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kiro_crew import agent_state, kiro_cli
-from kiro_crew.agent import OWNED_KIRO_AGENT_FILES, agents_spec_lock, kiro_agents_dir_path
+from kiro_crew.agent import (
+    OWNED_KIRO_AGENT_FILES,
+    _is_confirmed_managed_dashboard_author,
+    _read_spec_capped,
+    agents_spec_lock,
+    kiro_agents_dir_path,
+)
+from kiro_crew.agent_files import DASHBOARD_AUTHOR_AGENT_FILENAME
 from kiro_crew.agent_sdk.drivers.acp import derived_agent_permissions
 from kiro_crew.agent_spec_format import (
     agent_spec_candidates,
@@ -650,6 +657,29 @@ _INERT_FIELDS = frozenset({"$schema"})
 _REBUILT_FIELDS = frozenset({"hooks", "includeMcpJson"})
 
 
+def _parent_is_owned(snap: dict) -> bool:
+    """Is the capability projection's parent template one Crew owns?
+
+    A global-scope parent whose filename is in ``OWNED_KIRO_AGENT_FILES`` -- except the
+    dashboard-author stem, which was a user-creatable template name before it became owned.
+    For that stem the owned classification holds ONLY when the on-disk spec POSITIVELY
+    confirms as this installer's own -- its bytes reproduce the installer-recorded ownership
+    digest; a pre-existing user template at the stem -- one whose bytes do not reproduce it,
+    or an absent/unreadable file -- is NOT an owned parent, so a capability save
+    (``_maintain_owned`` / ``_unvouched``) does not refresh its inherited custom guards away
+    and publication does not bind the crew to that replacement. Fail-closed: unconfirmed is a
+    user file. The install gate and the fork-governance origin check apply the same gate.
+    """
+    parent_path = snap["parent"].get("path", "")
+    name = Path(parent_path).name
+    if snap["parent"].get("scope") != "global" or name not in OWNED_KIRO_AGENT_FILES:
+        return False
+    if name == DASHBOARD_AUTHOR_AGENT_FILENAME:
+        spec = _read_spec_capped(Path(parent_path))
+        return _is_confirmed_managed_dashboard_author(spec)
+    return True
+
+
 def _unvouched(snap: dict, spec: dict) -> list[str]:
     """Top-level keys of *spec* the review cannot show and this funnel cannot vouch for.
 
@@ -662,10 +692,7 @@ def _unvouched(snap: dict, spec: dict) -> list[str]:
     (``_INERT_FIELDS``). What remains is a hand edit no one has seen.
     """
     vouched = set(SECTIONS) | set(ORDINARY_FIELDS) | _STRUCTURAL_FIELDS | _INERT_FIELDS
-    if (
-        snap["parent"].get("scope") == "global"
-        and Path(snap["parent"].get("path", "")).name in OWNED_KIRO_AGENT_FILES
-    ):
+    if _parent_is_owned(snap):
         vouched |= _REBUILT_FIELDS
     if spec.get("permissions") == derived_agent_permissions(
         spec.get("allowedTools"), str(spec.get("name", ""))
@@ -706,16 +733,12 @@ def _stamp_reviewed(snap: dict, spec: dict, intent: dict) -> bool:
 def _maintain_owned(snap: dict, spec: dict) -> None:
     """Refresh host plumbing without regranting omitted capability entries."""
     from kiro_crew.agent import (
-        OWNED_KIRO_AGENT_FILES,
         _collect_app_mcp_servers,
         _refresh_dynamic_fields,
     )
 
     selected = copy.deepcopy(spec.get("mcpServers", {}))
-    if (
-        snap["parent"].get("scope") == "global"
-        and Path(snap["parent"].get("path", "")).name in OWNED_KIRO_AGENT_FILES
-    ):
+    if _parent_is_owned(snap):
         preserved = {
             key: copy.deepcopy(spec[key])
             for key in ("prompt", "model", "resources", "tools", "allowedTools")

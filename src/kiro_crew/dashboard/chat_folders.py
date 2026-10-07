@@ -41,6 +41,7 @@ from kiro_crew.folder_steering import crosses_memory_silo, memory_silo_fence
 from kiro_crew.hooks import is_unc_shape, unc_probe_allowed, validate_file_path
 from kiro_crew.llm_helpers import run_bg_oneliner
 from kiro_crew.loop_lock import LoopBoundLock
+from kiro_crew.messaging.link import is_channel_session_key
 from kiro_crew.sandbox import voice_runtime_workspace_conflict
 from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -1620,6 +1621,44 @@ async def api_chat_folder_create(request: web.Request) -> web.Response:
     return web.json_response(folder, status=201)
 
 
+def _caller_reaches_a_channel(request: web.Request, caller_key: str) -> bool:
+    """Whether a channel can deliver turns into the session behind *caller_key*.
+
+    The mirror and Slack-thread reading is the work-ledger gate's own
+    ``_reaches_a_channel``, called rather than re-composed, so both gates
+    resolve the caller's slot the same way and give one answer per session.
+    It fails closed on an unreadable store.
+
+    Two clauses sit on top of it, because the ledger reaches them elsewhere:
+    a ``channel:`` key (an agent spawned for a channel thread, which
+    ``is_channel_session_key`` does not name) and a channel-born slot
+    (``session_control._channel_link_of``). The ledger's entry gate covers a
+    channel-born caller through ``_caller_admission``; this endpoint has no
+    such gate, so it reads the slot's link here, on the slot found by the
+    ledger's normalisation of the key (``session_ledger.ledger_key``).
+    """
+    # Imported here: session_control (and the handlers that import it) import
+    # this module at load.
+    from kiro_crew import session_ledger
+    from kiro_crew.dashboard import session_control
+    from kiro_crew.dashboard.handlers.work_ledger import _reaches_a_channel
+
+    sk = (caller_key or "").strip()
+    if not sk:
+        return False
+    if sk.startswith("channel:") or is_channel_session_key(sk):
+        return True
+    if _reaches_a_channel(request, sk):
+        return True
+    state: DashboardState = request.app["state"]
+    key = session_ledger.ledger_key(sk)
+    for candidate in (sk, key, f"dashboard_{key}"):
+        slot = state.get_slot(candidate)
+        if slot is not None and session_control._channel_link_of(slot):
+            return True
+    return False
+
+
 async def api_chat_folder_update(request: web.Request) -> web.Response:
     """PATCH /api/chat/folders/{id} — rename or reorder a folder."""
     state: DashboardState = request.app["state"]
@@ -1801,14 +1840,46 @@ async def api_chat_folder_update(request: web.Request) -> web.Response:
     # persisted name — never from a pre-lock snapshot a concurrent write may
     # have superseded.
     committed_name: list[str] = []
+    origin_source, origin_caller = _audit_origin(request)
+    refuse_duplicate_name = origin_source != "dashboard"
     # A person editing anything beyond layout claims the folder: its agent mark
     # goes, and chat_folder_delete refuses it from then on. ``regenerate_icon``
     # is not in ``changes`` (the icon lands later, from the generator), so it
     # is counted here by name. A person moving a folder INTO another also
     # claims that destination, the same as nesting a new folder under it.
-    by_person = _audit_origin(request)[0] == "dashboard"
+    by_person = origin_source == "dashboard"
     claims_for_person = by_person and (regenerate_icon or bool(set(changes) - _LAYOUT_ONLY_FIELDS))
     claims_parent_for_person = by_person and reparenting and bool(new_parent)
+    # An agent rename or restyle from a session a channel can drive is refused
+    # here, not only in the MCP tool: a conversation resumed from a channel into
+    # a dashboard session keeps that session's ``dashboard:`` key, so no check on
+    # the key can tell the channel's turns from the person's. Reachability is
+    # state this endpoint holds (``_caller_reaches_a_channel``). Moves and
+    # reorders go through chat_folder_move, whose channel rule is its own.
+    caller_key = request.headers.get("X-Session-Key", "").strip()
+    if (
+        origin_source != "dashboard"
+        and ({"name", "icon", "color"} & changes.keys() or regenerate_icon)
+        and _caller_reaches_a_channel(request, caller_key)
+    ):
+        sel().log_api_access(
+            caller=request_app or origin_caller,
+            operation="chat.folder_update",
+            outcome="denied",
+            source="channel_containment",
+            resources=fid,
+            error="agent rename from a session a channel can drive",
+        )
+        return web.json_response(
+            {
+                "error": (
+                    "this session can receive turns from a channel conversation, so "
+                    "an agent cannot rename or restyle folders from it"
+                ),
+                "code": "channel_reachable_caller",
+            },
+            status=403,
+        )
 
     def _apply(folders: list[dict[str, Any]]) -> tuple[bool, str]:
         target = next((f for f in folders if f["id"] == fid), None)
@@ -1840,6 +1911,23 @@ async def api_chat_folder_update(request: web.Request) -> web.Response:
             # renders exactly as a reparent does. Checked for a move to the top
             # level too -- "" is still a move.
             return False, "foreign_descendant"
+        if refuse_duplicate_name and "name" in changes:
+            # Same rule and same place as create_folder_record's: an agent never
+            # makes a same-name sibling, because the two then share one path and
+            # neither can be addressed by it. Decided here, under the lock, over
+            # the whole tree -- a crew member's own GET is filtered, so a check
+            # against what the caller can read would miss a folder it cannot
+            # see. The folder's own row is excluded, so re-casing its own name
+            # is allowed. The browser keeps a person's freedom to name two alike.
+            final_parent = new_parent if reparenting else str(target.get("parent_id") or "")
+            folded = str(changes["name"]).strip().casefold()
+            if any(
+                str(f.get("id")) != fid
+                and str(f.get("parent_id") or "") == final_parent
+                and str(f.get("name") or "").strip().casefold() == folded
+                for f in folders
+            ):
+                return False, "name_exists"
         target.update(changes)
         if claims_for_person:
             target.pop(CREATED_BY_SESSION, None)
@@ -1920,6 +2008,22 @@ async def api_chat_folder_update(request: web.Request) -> web.Response:
                 "code": "folder_not_owned",
             },
             status=403,
+        )
+    if err == "name_exists":
+        sel().log_api_access(
+            caller=request_app or origin_caller,
+            operation="chat.folder_update",
+            outcome="denied",
+            source="duplicate_name",
+            resources=fid,
+            error="agent rename would duplicate a sibling folder name",
+        )
+        return web.json_response(
+            {
+                "error": "a sibling folder already has that name",
+                "code": "folder_name_exists",
+            },
+            status=409,
         )
     if err == "parent_not_found":
         # The parent was deleted while this request waited for the lock.

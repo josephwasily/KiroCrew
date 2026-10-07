@@ -407,3 +407,19 @@ def test_save_rejects_garbage_forum_chat_ids(tmp_path: Path, monkeypatch) -> Non
     status_body, _ = _client_put(mod, monkeypatch, tmp_path, {"allowed_forum_chat_ids": "-100"})
     assert status_body[0] == 400
     assert "must be a list" in status_body[1]["error"]
+
+
+def test_save_survives_wrong_typed_stored_allow_list(tmp_path: Path, monkeypatch) -> None:
+    """A hand-edited non-list ``allowed_user_ids`` in config.json degrades to
+    empty, so ``list(tg_cfg.get(...))`` is not called on a non-iterable and the
+    save still applies."""
+    import kiro_crew.dashboard.handlers.messaging as mod
+
+    _accept_token(monkeypatch, mod)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"telegram": {"allowed_user_ids": 123}}), encoding="utf-8")
+    status_body, _ = _client_put(mod, monkeypatch, tmp_path, {"allowed_user_ids": ["555"]})
+    status, _ = status_body
+    assert status == 200
+    saved = json.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["telegram"]["allowed_user_ids"] == [555]

@@ -3827,8 +3827,8 @@ class GatewayOrchestrator:
                         # last_status="ok" AND call record_success(), fabricating a
                         # run that never happened and refilling the auto-pause
                         # budget. The cancelled branch above escapes that only
-                        # because _execute additionally checks self._cancelled_jobs
-                        # membership, and a refused overlap is not in that set.
+                        # because _execute additionally checks the run claim's
+                        # cancel flag, and a refused overlap never sets it.
                         #
                         # So use the established deliberately-neutral shape of the
                         # starvation and fire-time-denial paths: last_status="error"
@@ -4239,7 +4239,7 @@ class GatewayOrchestrator:
                         # lifts auto-pause) on every non-error return — Skip
                         # included, since this branch returns None without
                         # setting last_status="error" — and its reset is guarded
-                        # by the _cancelled_jobs cancel-race check. Resetting in
+                        # by the claim.cancelled cancel-race check. Resetting in
                         # this branch would bypass that guard and could re-enable
                         # a job cancelled mid-tick.
                         # Result-less like the deny paths: a Skip that carried the
@@ -8014,7 +8014,9 @@ class GatewayOrchestrator:
                     payload["observed_at"] = float(at)
                 return payload
 
-            targets = _judge.parse_targets(_judge.spec_of(loop), loop.message)
+            targets = _judge.parse_targets(
+                _judge.spec_of(loop), loop.message, watched=_judge.watched_pr_subject(loop)
+            )
             # Pruned to the targets this tick actually reads, not merely copied. The
             # collector only ever ADDS a key, the targets come from ``loop.message``, and
             # ``asdict`` persists whatever the map holds, so without this a retarget

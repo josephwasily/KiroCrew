@@ -62,6 +62,7 @@ from kiro_crew.agent_discovery import (
 from kiro_crew.agent_files import (
     AGENT_FILENAME,
 )
+from kiro_crew.agent_files import DASHBOARD_AUTHOR_AGENT_FILENAME as _DASHBOARD_AUTHOR_FILENAME
 from kiro_crew.agent_files import HEARTBEAT_AGENT_FILENAME as _HEARTBEAT_AGENT_FILENAME
 from kiro_crew.agent_files import (
     OWNED_KIRO_AGENT_FILES,
@@ -274,11 +275,14 @@ if TYPE_CHECKING:  # served by ``__getattr__`` at runtime; named here for mypy
         _drop_servers,
         _excluded_verb,
         _file_identity,
+        _foreign_dashboard_author_spec_reason,
         _foreign_worker_spec_reason,
         _glob_hits,
         _grant_reaches_excluded,
+        _install_dashboard_author_agent,
         _install_worker_agent,
         _installed_default_spec,
+        _is_confirmed_managed_dashboard_author,
         _pattern_reaches_excluded,
         _refuse_foreign_worker_spec,
         _require_fresh_worker_spec,
@@ -1956,6 +1960,8 @@ _EXPORTS_BY_OWNER: dict[str, tuple[str, ...]] = {
         "DerivedSpecStale",
         "ForeignAgentSpec",
         "_foreign_worker_spec_reason",
+        "_foreign_dashboard_author_spec_reason",
+        "_is_confirmed_managed_dashboard_author",
         "_refuse_foreign_worker_spec",
         "default_spec_fingerprint",
         "_spec_fingerprint",
@@ -1966,6 +1972,7 @@ _EXPORTS_BY_OWNER: dict[str, tuple[str, ...]] = {
         "require_unchanged_derived_spec",
         "_require_fresh_worker_spec",
         "rederive_worker_agent",
+        "_install_dashboard_author_agent",
         "_WORKER_AGENT_FILENAME",
     ),
 }
@@ -2288,7 +2295,7 @@ def _refresh_dynamic_fields(
     # Imported lazily: config.loader imports this module, so a top-level import
     # would close the cycle. Warm by the time this runs (importing agent pulls
     # config.loader in), so the lookup costs nothing on the caller's thread.
-    from kiro_crew.config.loader import DEFAULT_MODEL, normalize_agent_model
+    from kiro_crew.config.loader import DEFAULT_MODEL, coerce_config_field, normalize_agent_model
 
     # Default-model tracking: when the model is managed (not an explicit user
     # pick), re-sync it from the shipped defaults.json so a default bump
@@ -2324,7 +2331,7 @@ def _refresh_dynamic_fields(
     # (` auto `, an int) from reaching a spec kiro-cli validates with
     # deny_unknown_fields — a spec it rejects wholesale, silently falling back to
     # the default agent.
-    mc_model = normalize_agent_model((mc_cfg.get("agent") or {}).get("model"))
+    mc_model = normalize_agent_model(coerce_config_field(mc_cfg, "agent", dict, {}).get("model"))
     if mc_model and not fork:
         config["model"] = mc_model
 
@@ -2548,9 +2555,36 @@ def migrate_relocated_skill_uris() -> int:
                         present.add(new_uri)
                 if not changed:
                     continue
+                # The skill-URI migration is a managed WRITER of this spec. For the
+                # dashboard-author stem, decide ownership from the PRE-rewrite bytes and renew
+                # the digest after the write only when they were our confirmed managed write
+                # -- otherwise the installer would read its own migrated spec as foreign and
+                # stop re-filtering its grants against a tightened ceiling. A user file (no
+                # recorded digest) is never stamped. ``worker_agent`` is the module global
+                # bound by the core's tail import, resolved at call time.
+                pre_migration_confirmed = (
+                    str(name) == worker_agent._MANAGED_OWNED_NAME
+                    and spec_path.stem == (worker_agent._MANAGED_OWNED_NAME)
+                    and worker_agent._is_confirmed_managed_dashboard_author(data)
+                )
+                pre_migration_digest = (
+                    agent_state.spec_digest(data) if pre_migration_confirmed else None
+                )
                 data["resources"] = updated
                 try:
-                    _atomic_json_write(spec_path, data)
+                    if pre_migration_confirmed:
+                        # Two-phase: keep the current on-disk digest in the finalized slot,
+                        # record the migrated bytes' digest as pending, write, finalize -- so
+                        # an interruption leaves the file matching a recorded slot.
+                        agent_state.begin_managed_write(
+                            spec_path.stem,
+                            agent_state.spec_digest(data),
+                            current=pre_migration_digest,
+                        )
+                        _atomic_json_write(spec_path, data)
+                        agent_state.finalize_managed_write(spec_path.stem)
+                    else:
+                        _atomic_json_write(spec_path, data)
                     rewritten += 1
                 except OSError as exc:
                     logger.warning(
@@ -2846,12 +2880,33 @@ def reset_agent_model(name: str) -> tuple[Path, str]:
             raise FileNotFoundError(f"could not read agent spec {spec_path}: {exc}") from exc
         if not isinstance(data, dict):
             raise FileNotFoundError(f"agent spec {spec_path} is not readable as a JSON object")
+        # Snapshot the PRE-edit bytes to decide ownership BEFORE this writer mutates them:
+        # the digest is renewed below only when the file WAS already our confirmed managed
+        # write, never for a user file at the once-user-creatable stem.
+        pre_write_confirmed = name == worker_agent._MANAGED_OWNED_NAME and (
+            worker_agent._is_confirmed_managed_dashboard_author(data)
+        )
+        # Digest of the CURRENT on-disk bytes (pre-edit), captured before mutation so
+        # ``begin_managed_write`` can keep the file confirmable if this write is interrupted.
+        pre_write_digest = agent_state.spec_digest(data) if pre_write_confirmed else None
         previous = data.get("model") or ""
         clear_model_pin(data, name)
         # Same strip every spec writer runs: kiro-cli validates with
         # deny_unknown_fields and drops the whole agent on an unknown key.
         agent_state.lift_and_strip_bookkeeping(data, name)
-        _atomic_json_write(spec_path, data)
+        # An authorized reset of the managed dashboard-author spec legitimately rewrites its
+        # bytes. Ownership is the installer-recorded DIGEST, renewed ONLY when the PRE-edit
+        # content was already our confirmed managed write (``pre_write_confirmed``) -- a user
+        # file at the stem is never stamped. Two-phase so a crash cannot leave bytes and
+        # record out of step: record the new bytes' digest as pending, write, finalize.
+        if pre_write_confirmed:
+            agent_state.begin_managed_write(
+                name, agent_state.spec_digest(data), current=pre_write_digest
+            )
+            _atomic_json_write(spec_path, data)
+            agent_state.finalize_managed_write(name)
+        else:
+            _atomic_json_write(spec_path, data)
     return spec_path, str(previous)
 
 
@@ -2937,6 +2992,17 @@ def _existing_specs_are_mine(target: Path, own_home: Path | None) -> bool | None
         # and a dangling one would then read as "no spec here" — an absence
         # verdict an attacker can manufacture in the same-uid agents dir.
         if not os.path.lexists(spec_path):
+            continue
+        # The dashboard-author stem was a user-creatable template name before it became
+        # owned, and its managed ``mcpServers`` entry carries no ``KIROCREW_HOME`` pin on
+        # either branch -- the installer's own write omits it, and a leftover user file at
+        # the stem never had one. So this stem can never contribute a legitimate home-pin
+        # signal, and letting it into the probe makes a non-default home read every such
+        # file (ours OR an untouched user leftover) as foreign and refuse creation of every
+        # required spec. Exclude it from the pin probe regardless of its provenance; its
+        # provenance is the installer-recorded ownership digest, checked at the install gate,
+        # not a home pin.
+        if name == _DASHBOARD_AUTHOR_FILENAME:
             continue
         found = True
         if expected is None:
@@ -3756,6 +3822,49 @@ def rebuild_agent_config(
     except Exception:
         logger.debug("kirocrew-worker agent install failed", exc_info=True)
 
+    # Install kirocrew-dashboard-author agent (authors one dashboard template and lands
+    # it as a PR). EAGER for the same forced reason spelled out on the worker above:
+    # ``session_create`` refuses an agent it cannot resolve, resolution reads a boot-time
+    # in-memory snapshot that no spec write refreshes, so a lazily-materialized spec is
+    # invisible to the validation that runs ahead of the spawn -- a conductor could never
+    # dispatch it on a clean install. Being here also re-filters its grants through the
+    # governance ceiling on every boot, so the spec normally cannot outlive a tightened
+    # ceiling -- with one exception: a file at the stem that is NOT this installer's own
+    # (its bytes do not reproduce the installer-recorded ownership digest) is left untouched,
+    # so a hand-authored user spec at the once-user-creatable stem -- or a copy of another
+    # owned agent renamed onto it -- is never overwritten. Ownership is the digest the
+    # installer records in the ``agent_state`` sidecar for this name.
+    dashboard_author_install_error: Exception | None = None
+    try:
+        worker_agent._install_dashboard_author_agent()
+    except Exception as exc:
+        # Capture, do NOT swallow. An installer failure must not ABORT the independent
+        # repairs below (fork governance refresh, hook repair) -- those run for every other
+        # installer's failure too -- so we let them run first. But it must not be reported as
+        # a SUCCESSFUL rebuild either: this spec's ``allowedTools`` is re-filtered through the
+        # governance ceiling on every rebuild, so a ceiling-TIGHTENING rebuild whose
+        # author-spec rewrite failed (e.g. a Windows sharing violation, a spec-lock timeout)
+        # leaves the spec's forbidden auto-approvals live. If this rebuild then reported
+        # success, ``reproject_for_ceiling_change`` would advance its generation memo and the
+        # next poll would NOT retry -- the forbidden grants would persist for the process
+        # lifetime. So the failure is re-raised at the END of the rebuild (after the
+        # independent repairs), which (a) escapes before ``_wrote_out`` is marked True, so
+        # ``rebuild_agent_config_reporting`` does not report a write, and (b) leaves the
+        # reprojection memo behind so the next poll retries -- the safe direction the
+        # success contract already documents for a post-write exception.
+        dashboard_author_install_error = exc
+        # A tightened ceiling whose author-spec rewrite failed leaves revoked auto-
+        # approvals live. Mark the hold so ``prime_ceiling_projection`` does not seed
+        # the ceiling as projected, and ``retry_held_conductor_specs`` retries the
+        # rewrite on the next maintenance poll (GPT 6.1 F1: boot-time author install
+        # failures lose the governance retry).
+        _conductor_spec_held = True
+        logger.warning(
+            "kirocrew-dashboard-author agent install failed; completing independent repairs "
+            "then failing the rebuild so a tightened ceiling is retried, not marked synced",
+            exc_info=True,
+        )
+
     # Bidirectional sync: ensure packages installed for one provider
     # are also available for the other (agents↔plugins, skills).
     sync_aim_packages()
@@ -3764,6 +3873,13 @@ def rebuild_agent_config(
 
     # Security: sanitize invalid hook keys in agent configs
     repair_agent_configs()
+
+    if dashboard_author_install_error is not None:
+        # The independent repairs have run; now fail the rebuild. ``_wrote_out`` is left
+        # UNMARKED (so the reporting wrapper returns ``wrote=False``-equivalent by never
+        # appending True) and the exception propagates, which is what keeps a tightened
+        # ceiling from being recorded as projected while the governed spec was not rewritten.
+        raise dashboard_author_install_error
 
     if _wrote_out is not None:
         _wrote_out.append(True)
@@ -4489,6 +4605,8 @@ handle immediately.
 #:   person has not touched since, and refuses an app or crew member outright.
 #:   It is withheld for the ``session_summary`` reason: no conductor step calls
 #:   it yet. A skill whose cleanup step adopts it adds it here with that step.
+#: * ``chat_folder_update`` — WITHHELD. Renames or restyles an existing folder,
+#:   which may be the person's, and no conductor step needs it.
 #: * ``chat_tag_list`` / ``chat_tag_create`` / ``chat_tag_update`` — WITHHELD,
 #:   not because any fails the invariant (a read, a create that dedups on name,
 #:   and a metadata edit that loses no assignment) but because no conductor step
@@ -5302,13 +5420,24 @@ def _sanitize_agent_hooks() -> None:
     agents_dir = kiro_agents_dir_path()
     for filename in OWNED_KIRO_AGENT_FILES:
         f = agents_dir / filename
+        # Refuse a symlink or out-of-dir resolution BEFORE touching the file: the sweep
+        # reads every owned name, and following a link at an owned stem (e.g. one planted at
+        # kirocrew-dashboard-author.json pointing at ~/.docker/config.json) would read a
+        # file outside the agents dir. ``_spec_path_is_safe`` is the same no-follow fence the
+        # install and reset paths use; an absent file simply is not safe-and-present, so it
+        # is skipped here as before.
+        if not os.path.lexists(f) or not _spec_path_is_safe(f, agents_dir):
+            continue
         try:
             mtime = f.stat().st_mtime
         except OSError:
             continue
         if _hooks_sanitized_mtimes.get(str(f)) == mtime:
             continue
-        data = _load_json(f)
+        # Capped, no-follow read (the hardened spec reader) rather than ``_load_json``,
+        # which follows symlinks and is uncapped: a sweep over owned names must never slurp
+        # or launder a file the reader may not open.
+        data = _read_spec_capped(f)
         if not data:
             continue
         hooks = data.get("hooks")
@@ -5319,12 +5448,34 @@ def _sanitize_agent_hooks() -> None:
         if not removed_keys:
             _hooks_sanitized_mtimes[str(f)] = mtime
             continue
+        # Decide ownership from the PRE-sweep bytes: the digest is renewed below only when
+        # the file as READ already reproduced the recorded digest, i.e. it was our confirmed
+        # managed write. Keying on "a digest exists" (a stale record from a managed install
+        # the user later replaced at the stem) would stamp the user's swept bytes as managed
+        # and let the next rebuild overwrite them. ``worker_agent`` is a module global bound
+        # by the tail import below (like ``kiro_hooks`` above), resolved at call time.
+        stem = filename.removesuffix(".json")
+        pre_sweep_confirmed = stem == worker_agent._MANAGED_OWNED_NAME and (
+            worker_agent._is_confirmed_managed_dashboard_author(data)
+        )
+        pre_sweep_digest = agent_state.spec_digest(data) if pre_sweep_confirmed else None
         data["hooks"] = {
             key: value
             for key, value in hooks.items()
             if key not in kiro_hooks._LEGACY_KIROCREW_HOOK_KEYS
         }
-        _atomic_json_write(f, data)
+        # The sweep changes the bytes the ownership digest was recorded against. Renew it to
+        # match -- but ONLY when the pre-sweep file was already our confirmed managed write
+        # (``pre_sweep_confirmed``); a user file is never stamped. Two-phase so a crash leaves
+        # bytes and record in step: record the swept bytes' digest as pending, write, finalize.
+        if pre_sweep_confirmed:
+            agent_state.begin_managed_write(
+                stem, agent_state.spec_digest(data), current=pre_sweep_digest
+            )
+            _atomic_json_write(f, data)
+            agent_state.finalize_managed_write(stem)
+        else:
+            _atomic_json_write(f, data)
         _hooks_sanitized_mtimes[str(f)] = f.stat().st_mtime
         logger.info("Removed legacy Kiro Crew hook keys %s from %s", removed_keys, f.name)
         sel().log_api_access(

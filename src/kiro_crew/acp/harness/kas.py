@@ -27,6 +27,7 @@ from typing import Any
 from kiro_crew import agent as agent_mod
 from kiro_crew.acp import kas_agents as kas_agents_mod
 from kiro_crew.acp._dispatch import advertised_mode_origin
+from kiro_crew.acp.child_env_defaults import apply_child_env_defaults
 from kiro_crew.acp.harness._common import (
     KIRO_FAMILY_ALIASES,
     MembershipHarness,
@@ -156,6 +157,9 @@ class KasHarness(MembershipHarness):
 
         The relay is kiro-cli, so it reads the same Tool Search never-defer list;
         :func:`pin_mandatory_mcps_env` pins it by operator override or engine version.
+
+        ``agent.child_env_defaults`` applies here too, for the same reason: the
+        relay is a kiro-cli process with the same core-count-sized pools.
         """
         from kiro_crew.config.loader import inject_kiro_cli_api_key, strip_kiro_cli_api_key
 
@@ -164,6 +168,7 @@ class KasHarness(MembershipHarness):
         else:
             strip_kiro_cli_api_key(env)
         pin_mandatory_mcps_env(env, spawned_binary=spawned_binary)
+        apply_child_env_defaults(env)
 
     @property
     def verifies_agent_activation(self) -> bool:

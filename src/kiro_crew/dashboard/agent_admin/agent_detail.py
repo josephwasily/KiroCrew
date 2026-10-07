@@ -13,6 +13,7 @@ from aiohttp import web
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.handlers.agents import (
+        DASHBOARD_AUTHOR_AGENT_FILENAME,
         MAX_AGENT_SKILLS,
         TEMPLATE_DEFINITION_KEYS,
         CapabilityError,
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
         _AmbiguousTemplateName,
         _atomic_json_write,
         _get_config_lock,
+        _is_confirmed_managed_dashboard_author,
         _read_agent_spec,
         _read_session_key,
         _require_owner,
@@ -377,6 +379,12 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                             )
                             if fresh is None:
                                 raise FileNotFoundError(f)
+                            # Snapshot the PRE-merge bytes: the dashboard-author ownership
+                            # digest is renewed below only when this pre-write content was
+                            # ALREADY our confirmed managed write, never for a user file at
+                            # the stem (which would stamp the user's bytes as managed and let
+                            # the next rebuild overwrite them).
+                            pre_write = copy.deepcopy(fresh)
                             # Check the file stem AND its fresh declared name
                             # before ALL bookkeeping; the earlier name can be
                             # stale. Keep the spec -> sidecar lock order.
@@ -407,8 +415,27 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                             # Atomic replace: a direct write truncates first,
                             # so ENOSPC mid-write would destroy the existing
                             # template. Same tmp+rename helper as the fork
-                            # refresh and install paths.
-                            _atomic_json_write(f, fresh)
+                            # refresh and install paths. An authorized model/skills edit of
+                            # the OWNED dashboard-author spec renews the ownership digest ONLY
+                            # when the PRE-write content was already our confirmed managed
+                            # spec -- a user file at the once-user-creatable stem is never
+                            # stamped. Two-phase (begin pending -> write -> finalize) so a
+                            # crash leaves bytes and record in step and the installer keeps
+                            # re-filtering against a tightened ceiling. The helper and the
+                            # owned filename are composed GLOBALS (bound from the agents
+                            # facade), so this owner submodule imports no materialization owner.
+                            if f.stem == Path(DASHBOARD_AUTHOR_AGENT_FILENAME).stem and (
+                                _is_confirmed_managed_dashboard_author(pre_write)
+                            ):
+                                agent_state.begin_managed_write(
+                                    f.stem,
+                                    agent_state.spec_digest(fresh),
+                                    current=agent_state.spec_digest(pre_write),
+                                )
+                                _atomic_json_write(f, fresh)
+                                agent_state.finalize_managed_write(f.stem)
+                            else:
+                                _atomic_json_write(f, fresh)
                         if snapshot is None:
                             # No skills in this patch: the mapping is the pre-lock read's.
                             return mapped

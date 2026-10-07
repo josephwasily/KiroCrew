@@ -1424,8 +1424,8 @@ describe('ChatPage file-chip remove parity', { timeout: 15_000 }, () => {
 
     const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
     fireEvent.paste(ta, { clipboardData: { types: ['text/plain'], items: [], getData: () => 'line one\nline two\nline three\nline four\nline five\nline six' } })
-    await waitFor(() => expect(ta.value).toMatch(/\[ Paste #1 · \d+ lines \]/))
-    const token = ta.value.match(/\[ Paste #1 · \d+ lines \]/)![0]
+    await waitFor(() => expect(ta.value).toMatch(/\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · \d+ lines \]/))
+    const token = ta.value.match(/\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · \d+ lines \]/)![0]
 
     // Park the caret INSIDE the token (preview position) and record it.
     const inside = ta.value.indexOf(token) + 4

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readPaneDraft, writePaneDraft, takePaneDraft, mergePaneDraft, subscribePaneDraft, PANE_DRAFTS_KEY, LEGACY_PANE_FILE_DRAFTS_KEY, PANE_DRAFTS_MAX_BYTES, __resetPaneDraftsForTests } from '../utils/chatPaneDrafts'
-import { carryPastes, mergeCarriedDraft, type PasteBlock } from '../utils/pasteTokens'
+import { carryPastes, formatToken, mergeCarriedDraft, type PasteBlock } from '../utils/pasteTokens'
 
 /* The pane's parked drafts must survive the storage layer refusing a write:
  * a quota that ChatPage's own 2 MiB stores may already have filled, or a
@@ -213,13 +213,13 @@ describe('chatPaneDrafts', () => {
 
   it('a late merge re-numbers a carried block that collides with a parked one', () => {
     const parked = block(1, 'parked\ncontent\nhere')
-    writePaneDraft('a', { text: '[ Paste #1 · 3 lines ]', files: [], pastes: [parked] })
+    writePaneDraft('a', { text: formatToken(parked), files: [], pastes: [parked] })
     const carried = block(1, 'late\ncontent\ntoo')
-    mergePaneDraft('a', '[ Paste #1 · 3 lines ]', [], [carried])
+    mergePaneDraft('a', formatToken(carried), [], [carried])
     const merged = readPaneDraft('a')
     // Both tokens survive, and the carried one now points at seq 2.
-    expect(merged.text).toContain('[ Paste #1 · 3 lines ]')
-    expect(merged.text).toContain('[ Paste #2 · 3 lines ]')
+    expect(merged.text).toContain(formatToken(parked))
+    expect(merged.text).toContain(formatToken({ ...carried, seq: 2 }))
     expect(merged.pastes).toEqual([parked, { ...carried, seq: 2 }])
   })
 })
@@ -257,8 +257,8 @@ describe('carryPastes', () => {
     const kept = [block(1, 'k\nk\nk')]
     const free = block(3, 'f\nf\nf')
     const taken = block(1, 't\nt\nt')
-    const { text, pastes } = carryPastes('[ Paste #3 · 3 lines ] [ Paste #1 · 3 lines ]', [free, taken, kept[0]], kept)
+    const { text, pastes } = carryPastes(`${formatToken(free)} ${formatToken(taken)}`, [free, taken, kept[0]], kept)
     expect(pastes).toEqual([kept[0], free, { ...taken, seq: 2 }])
-    expect(text).toBe('[ Paste #3 · 3 lines ] [ Paste #2 · 3 lines ]')
+    expect(text).toBe(`${formatToken(free)} ${formatToken({ ...taken, seq: 2 })}`)
   })
 })

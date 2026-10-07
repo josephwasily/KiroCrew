@@ -22,7 +22,13 @@ from kiro_crew import platform_compat
 from kiro_crew._sqlite_compat import fts5_segment_for_index, sqlite3
 from kiro_crew.artifacts import get_default_store
 from kiro_crew.config import live
-from kiro_crew.config.loader import KiroCrewConfig, config_dir, data_home, read_config_text
+from kiro_crew.config.loader import (
+    KiroCrewConfig,
+    coerce_config_field,
+    config_dir,
+    data_home,
+    read_config_text,
+)
 from kiro_crew.dashboard import part_stream
 from kiro_crew.dashboard.handlers._shared import (
     read_bounded_json,
@@ -2947,8 +2953,14 @@ async def search_for_context(request: web.Request) -> web.Response:
     knowledge_cfg = cfg.get("knowledge")
     if not isinstance(knowledge_cfg, dict):
         knowledge_cfg = {}
-    top_n = knowledge_cfg.get("fetch_top_n", KNOWLEDGE_FETCH_TOP_N)
-    max_tokens = knowledge_cfg.get("fetch_max_tokens", KNOWLEDGE_FETCH_MAX_TOKENS)
+    # A hand-edited config.json can carry a wrong-typed fetch_top_n/
+    # fetch_max_tokens; coerce them the way the validated loader degrades a
+    # mistyped field, so a non-numeric value falls back to the default instead
+    # of reaching int() (TypeError) on this read-only GET.
+    top_n = coerce_config_field(knowledge_cfg, "fetch_top_n", int, KNOWLEDGE_FETCH_TOP_N)
+    max_tokens = coerce_config_field(
+        knowledge_cfg, "fetch_max_tokens", int, KNOWLEDGE_FETCH_MAX_TOKENS
+    )
 
     try:
         limit = min(100, max(1, int(request.query.get("limit", top_n))))

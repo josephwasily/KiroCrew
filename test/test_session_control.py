@@ -4152,6 +4152,7 @@ _DASHBOARD_TOOL_CALLS = {
     "chat_folder_tree": {},
     "chat_folder_create": {"name": "New"},
     "chat_folder_move": {"folder": "Travel", "new_parent": "kirocrew"},
+    "chat_folder_update": {"folder": "Travel", "name": "Trips"},
     "chat_folder_move_session": {"session": "chat-3", "folder": "Travel"},
     "chat_folder_delete": {"folder": "Travel"},
     "chat_folder_file_self": {"folder": "Travel"},

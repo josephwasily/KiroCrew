@@ -452,7 +452,9 @@ export function createMessagingEndpoints({ get, post, put, j }: ClientTransport)
     // starting it (pairing begins inside the channel's own connect()), so a caller
     // that ignores this field renders a wait for a code that will never arrive.
     whatsAppQrStart: () => post('/api/channels/whatsapp/qr/start', {}).then(j) as Promise<{ ok: boolean; state?: string; error?: string }>,
-    whatsAppQrStatus: () => get('/api/channels/whatsapp/qr/status').then(j) as Promise<{ state: string; qr_data_url: string | null; detail: string }>,
+    // `qr_expired` means the newest code is past the life WhatsApp gives it: the
+    // panel must clear the image it is showing, not keep the last one up.
+    whatsAppQrStatus: () => get('/api/channels/whatsapp/qr/status').then(j) as Promise<{ state: string; qr_data_url: string | null; qr_expired?: boolean; detail: string }>,
     // Two distinguishable successes: a bare `ok` means the device is unlinked and
     // the local session is gone, while `code: 'session_file_kept'` means the device
     // IS unlinked but the store holding its keys survived. A refused logout is an

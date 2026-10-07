@@ -1679,6 +1679,7 @@ class TestAdvertisedSet:
             "chat_folder_tree",
             "chat_folder_create",
             "chat_folder_move",
+            "chat_folder_update",
             "chat_folder_move_session",
             "chat_folder_delete",
             "chat_folder_file_self",

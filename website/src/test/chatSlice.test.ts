@@ -6,6 +6,7 @@ import reducer, {
   clampToolOutput,
   setActiveSlot,
   setPendingInput,
+  stageToMainComposer,
   appendMessage,
   appendSlotMessage,
   updateStreamingMessage,
@@ -74,6 +75,12 @@ describe('chatSlice reducers', () => {
 
   it('setPendingInput', () => {
     expect(reducer(initial, setPendingInput('hello')).pendingInput).toBe('hello')
+  })
+
+  it('stageToMainComposer', () => {
+    const staged = reducer(initial, stageToMainComposer({ slot: 's1', text: 'do X in main' }))
+    expect(staged.mainComposerAppend).toEqual({ slot: 's1', text: 'do X in main' })
+    expect(reducer(staged, stageToMainComposer(null)).mainComposerAppend).toBeNull()
   })
 
   it('appendMessage', () => {
@@ -2222,6 +2229,25 @@ describe('forkSlot thunk', () => {
 
     const slots = store.getState().dashboard.slots
     expect(slots).toContainEqual(expect.objectContaining({ key: 'chat-2-123', title: 'Fork of Parent' }))
+  })
+
+  it('a fork the server reports pinned lands in the pinned group before the slots refresh', async () => {
+    const { server } = await import('../../integration/mocks/server')
+    const { http, HttpResponse } = await import('msw')
+    server.use(
+      http.post('/api/chat/slots/:slot/fork', () => HttpResponse.json({
+        ok: true, key: 'chat-3-123', title: 'Fork of Pinned', messages: 2, prompt: '', pinned: true,
+      })),
+    )
+
+    const { configureStore } = await import('@reduxjs/toolkit')
+    const chatSlice = await import('../store/chatSlice')
+    const dashboardReducer = (await import('../store/dashboardSlice')).default
+    const store = configureStore({ reducer: { chat: chatSlice.default, dashboard: dashboardReducer } })
+    await store.dispatch(chatSlice.forkSlot({ slot: 'chat-1-100' })).unwrap()
+
+    const row = store.getState().dashboard.slots.find(s => s.key === 'chat-3-123')
+    expect(row?.pinned).toBe(true)
   })
 
   it('skips addSlotOptimistic when response.ok is false', async () => {

@@ -3479,3 +3479,44 @@ def test_a_hand_edited_block_still_blocks_a_fork_on_a_refusing_cli(editor, monke
     with pytest.raises(CapabilityError, match="alternate_permissions_require_review"):
         service.reset("A", target)
     assert spec_for(home, specs)["prompt"] == "mine"
+
+
+def test_parent_is_owned_confirmation_gates_the_dashboard_author_stem(tmp_path, monkeypatch):
+    """F3 (fail-safe): a global owned-filename parent reads as owned -- except the
+    dashboard-author stem, which was a user-creatable template name before it became owned.
+    For that stem the owned classification holds ONLY when the on-disk spec POSITIVELY
+    confirms as this installer's own -- its bytes reproduce the installer-recorded ownership
+    digest. A pre-existing user template at the stem -- no recorded digest, or an
+    absent/unreadable file -- is NOT an owned parent, so a capability save does not refresh
+    its inherited guards away."""
+    from kiro_crew import agent_capabilities as cap
+    from kiro_crew import agent_state
+
+    parent = tmp_path / "kirocrew-dashboard-author.json"
+    snap = {"parent": {"scope": "global", "path": str(parent)}}
+
+    # Another owned name is owned.
+    other = {"parent": {"scope": "global", "path": str(tmp_path / "kirocrew.json")}}
+    assert cap._parent_is_owned(other) is True
+    # A non-global parent is never owned.
+    assert cap._parent_is_owned({"parent": {"scope": "project", "path": str(parent)}}) is False
+    # A global parent NOT in the owned set is not owned.
+    unowned = {"parent": {"scope": "global", "path": str(tmp_path / "my-template.json")}}
+    assert cap._parent_is_owned(unowned) is False
+
+    # Dashboard-author stem, ABSENT file -> not confirmed -> NOT owned (fail-safe).
+    assert cap._parent_is_owned(snap) is False
+    # A file at the stem with NO recorded ownership digest -> not confirmed -> NOT owned.
+    managed = {"name": "kirocrew-dashboard-author", "mcpServers": {"kirocrew-core": {}}}
+    parent.write_text(json.dumps(managed, indent=2) + "\n", encoding="utf-8")
+    assert cap._parent_is_owned(snap) is False
+    # Record the ownership digest of these exact bytes -> reproduces it -> owned.
+    agent_state.set_managed_digest("kirocrew-dashboard-author", agent_state.spec_digest(managed))
+    assert cap._parent_is_owned(snap) is True
+
+
+def cap_agent_state_for(cap):
+    """`_parent_is_owned` imports agent_state locally; patch the module object itself."""
+    from kiro_crew import agent_state
+
+    return agent_state

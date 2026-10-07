@@ -515,3 +515,24 @@ def test_a_save_answers_only_after_the_watcher_applied_it(tmp_path: Path, monkey
     status_body, _ = _client_put(mod, monkeypatch, tmp_path, {"allowed_user_ids": ["111"]})
     assert status_body[0] == 200
     applied.assert_awaited_once()
+
+
+def test_save_survives_wrong_typed_stored_allow_list(tmp_path: Path, monkeypatch) -> None:
+    """A hand-edited non-list ``allowed_user_ids`` in config.json degrades to
+    empty, so the save's comparison does not iterate a non-iterable and the
+    save still applies.
+    """
+    import kiro_crew.dashboard.handlers.messaging as mod
+
+    _accept_token(monkeypatch, mod)
+    cfg = tmp_path / "config.json"
+    # ``allowed_user_ids`` stored as an int is not iterable, so the saver coerces
+    # it to a list before comparing against the incoming value.
+    cfg.write_text(json.dumps({"discord": {"allowed_user_ids": 123}}), encoding="utf-8")
+    status_body, _ = _client_put(
+        mod, monkeypatch, tmp_path, {"allowed_user_ids": ["111222333444555666"]}
+    )
+    status, body = status_body
+    assert status == 200
+    saved = json.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["discord"]["allowed_user_ids"] == ["111222333444555666"]

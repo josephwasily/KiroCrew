@@ -778,14 +778,14 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
       })
     })
     // The textarea now holds the token, not the raw content.
-    await waitFor(() => expect(input.value).toMatch(/\[ Paste #1 · 5 lines \]/))
+    await waitFor(() => expect(input.value).toMatch(/\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 5 lines \]/))
 
     // Switch away and back WITHOUT sending.
     act(() => { store.dispatch(setActiveSlot('slot-b')) })
     act(() => { store.dispatch(setActiveSlot('slot-a')) })
 
     // Token text is restored AND still backed by its block.
-    await waitFor(() => expect((screen.getByLabelText('Message input') as HTMLTextAreaElement).value).toMatch(/\[ Paste #1 · 5 lines \]/))
+    await waitFor(() => expect((screen.getByLabelText('Message input') as HTMLTextAreaElement).value).toMatch(/\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 5 lines \]/))
 
     // Send — the LLM must receive the EXPANDED content, never the literal token.
     await act(async () => { fireEvent.keyDown(screen.getByLabelText('Message input'), { key: 'Enter' }) })
@@ -793,7 +793,7 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
     await waitFor(() => expect(api.sendChat).toHaveBeenCalled())
     const llmText = vi.mocked(api.sendChat).mock.calls[0][0] as string
     expect(llmText).toContain('line1\nline2\nline3\nline4\nline5')
-    expect(llmText).not.toContain('[ Paste #1 · 5 lines ]')
+    expect(llmText).not.toMatch(/\[ Paste #/)
   })
 
   it('restores paste blocks to the active slot on connection error', async () => {
@@ -812,7 +812,7 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
         clipboardData: { items: [], getData: (t: string) => (t === 'text' ? pasted : '') },
       })
     })
-    await waitFor(() => expect(input.value).toMatch(/\[ Paste #1 · 4 lines \]/))
+    await waitFor(() => expect(input.value).toMatch(/\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 4 lines \]/))
 
     await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
 

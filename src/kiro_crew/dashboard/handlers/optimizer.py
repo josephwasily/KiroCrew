@@ -37,7 +37,16 @@ _OPTIMIZER_DENY_REASON = (
 # Placeholder the frontend collapses large pastes into (mirrors formatToken in
 # pasteTokens.ts: "[ Paste #N · M lines ]"). The middle dot is U+00B7. Captured
 # group 1 is the seq number, used to scope which paste content to forward.
-PASTE_TOKEN_REGEX = re.compile(r"\[ Paste #(\d+) · \d+ lines \]")
+#
+# The frontend also carries the block's stable id as an ENTIRELY zero-width run
+# right after "#N" (pasteTokens.ts: a U+200B/U+200C bit run fenced by two U+2063
+# INVISIBLE SEPARATORs), so a recalled token pairs to its own block rather than
+# to a reused seq. The run is invisible and does not affect this handler —
+# content is still scoped by seq — so it is matched-but-not-captured here. The
+# group is OPTIONAL so a legacy token written before id-addressing still
+# matches, and so the full-string multiset check in _paste_token_counts keeps
+# matching the exact token the frontend substitutes back (invisible run and all).
+PASTE_TOKEN_REGEX = re.compile(r"\[ Paste #(\d+)(?:\u2063[\u200b\u200c]+\u2063)? · \d+ lines \]")
 
 # Total budget for pasted content forwarded to the model. Individual pastes can
 # be arbitrarily large (logs, transcripts); an unbounded dump would blow the

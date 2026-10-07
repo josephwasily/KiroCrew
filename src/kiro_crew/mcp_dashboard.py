@@ -19,8 +19,8 @@ every tool in it. That is the unit to keep in mind when adding one — a capabil
 that must be grantable separately belongs in a server of its own.
 
 What it controls today is the chat (sidebar) folder tree: read it, create a
-folder, reparent a folder, file a live session into one, and delete a folder
-that is EMPTY. No rename. The delete asks the endpoint for its empty-only mode
+folder, reparent a folder, rename or restyle one (name, icon, color), file a
+live session into one, and delete a folder that is EMPTY. The delete asks the endpoint for its empty-only mode
 (``?if_empty=true``), which refuses a folder holding a subfolder or a live or
 archived session instead of unfiling them, so nothing here can lose a
 conversation. It also
@@ -243,6 +243,56 @@ def _folder_tools() -> tuple[Tool, ...]:
                 "GET /api/chat/folders",
                 "PATCH /api/chat/folders/{folder}",
                 "POST /api/chat/folders/reorder",
+            ),
+        ),
+        Tool(
+            name="chat_folder_update",
+            description=(
+                "Rename a sidebar folder and/or set its icon or color. ``folder`` "
+                "is a folder id or '/'-separated human path from chat_folder_tree. "
+                "Pass any of ``name`` (max 100 chars, no '/', like "
+                "chat_folder_create), ``icon`` (exactly one emoji; '' restores the "
+                "default glyph) or ``color`` (a folder palette value such as "
+                "'#22c55e'; '' clears it). A name a sibling folder already has is "
+                "refused, since the two could not be told apart by path. Metadata "
+                "only: sessions and subfolders stay where they are. To reparent or "
+                "reorder use chat_folder_move. This tool deliberately cannot set "
+                "project_dir, default_agent or steering_dirs (they are unknown "
+                "fields here): those fields change the working directory, agent, "
+                "memory boundary or standing instructions of every future session "
+                "filed in the folder, which is the person's call in the folder "
+                "settings, not an agent's. An app agent or crew member may update "
+                "only a folder it created. Refused in a session linked to a channel "
+                "(a resumed channel conversation, a channel mirror or a linked Slack "
+                "thread)."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "Folder to update (id or path)."},
+                    "name": {
+                        "type": "string",
+                        "description": "New name (max 100 chars, cannot contain '/').",
+                    },
+                    "icon": {
+                        "type": "string",
+                        "description": "One emoji for the folder glyph; '' restores the default.",
+                    },
+                    "color": {
+                        "type": "string",
+                        "description": (
+                            "Folder palette color ('#rrggbb' from the palette); '' clears it."
+                        ),
+                    },
+                },
+                "required": ["folder"],
+            },
+            run=_run_chat_folder_update,
+            identity="attribution",
+            routes=(
+                "GET /api/chat/slots",
+                "GET /api/chat/folders",
+                "PATCH /api/chat/folders/{folder}",
             ),
         ),
         Tool(
@@ -3455,6 +3505,100 @@ def _run_chat_folder_move(args: dict[str, Any], ctx: ToolContext) -> str:
             f"Moved folder (id={fld_id}) to `{dest_path}`, positioned {side} " f"`{anchor_path}`."
         )
     return redact(f"Moved folder (id={fld_id}) to `{dest_path}`.")
+
+
+def _run_chat_folder_update(args: dict[str, Any], ctx: ToolContext) -> str:
+    # The body is built from these three fields only, so no other folder field
+    # can reach the PATCH even if the schema later grows one. The schema does
+    # not list the keep-off fields, so validation refuses them as unknown.
+    folder_changes: dict[str, Any] = {}
+    # Test the VALUE, not the key: the schema keeps an explicit JSON null as
+    # ``None``, and ``str(None)`` would rename the folder to "None".
+    if args.get("name") is not None:
+        # Same rules as chat_folder_create: no '/', redact before the write, and
+        # check the stored (redacted) length, because the endpoint keeps
+        # ``name[:100]`` and a truncated name no later path lookup matches.
+        if "/" in str(args["name"]):
+            return (
+                "Error: a folder name cannot contain '/' — it would render "
+                "identically to a nested path and become unaddressable by path."
+            )
+        safe_name = redact(str(args["name"])).strip()
+        if not safe_name:
+            return "Error: folder name must not be empty"
+        if len(safe_name) > _MAX_FOLDER_NAME:
+            return (
+                f"Error: folder name too long after redaction ({len(safe_name)} "
+                f"chars): `{safe_name[:40]}…` — keep it to {_MAX_FOLDER_NAME} "
+                "characters or fewer"
+            )
+        folder_changes["name"] = safe_name
+    # Icon and color pass through as given: '' clears, and the endpoint's
+    # single-emoji check and palette allowlist are the authority for the rest.
+    if args.get("icon") is not None:
+        folder_changes["icon"] = str(args["icon"])
+    if args.get("color") is not None:
+        folder_changes["color"] = str(args["color"]).lower()
+    if not folder_changes:
+        return "Error: pass at least one of ``name``, ``icon`` or ``color``"
+    caller_key, _caller_app, gate = _refuse_tree_shaping_if_unverifiable(ctx, "updating a folder")
+    if gate:
+        return gate
+    # Channel callers are refused by the endpoint (403 ``channel_reachable_caller``),
+    # which sees every channel-shaped key and the channel bindings of a dashboard
+    # session; the CHANNEL_AGENT_BLOCKED_TOOLS entry hides the tool at the
+    # permission prompt.
+    chat_folders, folders_err = _get_rows(ctx.client, "/api/chat/folders")
+    if folders_err:
+        return f"Error: {folders_err}"
+    fld_id, fld_err = _resolve_chat_folder_id(args["folder"], chat_folders)
+    if fld_err:
+        return f"Error: {fld_err}"
+    if not fld_id:
+        return "Error: 'root' is not a folder — name the folder to update."
+    before = next((f for f in chat_folders if str(f.get("id")) == fld_id), {})
+    before_path = _chat_folder_paths(chat_folders).get(fld_id) or str(before.get("name") or fld_id)
+    # Ownership (an app or crew member may update only a folder it created) and
+    # the sibling-name rule are the endpoint's, decided under the folder-store
+    # lock over the whole tree rather than the part this caller can read.
+    try:
+        ctx.client.patch(
+            f"/api/chat/folders/{quote(fld_id, safe='')}", folder_changes, session_key=caller_key
+        )
+    except DashboardError as refused:
+        if refused.code == "folder_name_exists":
+            return (
+                "Error: a sibling folder already has that name. Two folders "
+                "with one name under the same parent cannot be told apart by "
+                "path, so the rename is refused."
+            )
+        if refused.code == "folder_not_owned":
+            return (
+                "Error: this caller does not own that folder. An app agent or "
+                "crew member may update only a folder it created; ask the "
+                "person to rename or restyle theirs."
+            )
+        if refused.code == "channel_reachable_caller":
+            # A channel conversation resumed into this dashboard session runs
+            # under its ``dashboard:`` key, so only the endpoint's reachability
+            # check can see it.
+            return (
+                "Error: this session is linked to a channel conversation, so its "
+                "turns may come from thread text other people wrote and "
+                "chat_folder_update is refused. Unlink the channel, or rename "
+                "the folder in the sidebar."
+            )
+        return redact(f"Error: {refused.error}")
+    # Report what was written, not the response row: the endpoint returns the
+    # folder object it looked up before taking the store lock.
+    parts = []
+    if "name" in folder_changes:
+        parts.append(f"renamed to `{folder_changes['name']}`")
+    if "icon" in folder_changes:
+        parts.append(f"icon {folder_changes['icon'] or '(default)'}")
+    if "color" in folder_changes:
+        parts.append(f"color {folder_changes['color'] or '(default)'}")
+    return redact(f"Updated folder `{before_path}` (id={fld_id}): {'; '.join(parts)}.")
 
 
 def _run_chat_folder_move_session(args: dict[str, Any], ctx: ToolContext) -> str:

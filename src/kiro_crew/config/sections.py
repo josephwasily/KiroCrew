@@ -369,6 +369,67 @@ def coerce_deepseek_env(raw: object) -> dict[str, str]:
     }
 
 
+#: The only names ``agent.child_env_defaults`` accepts. An allowlist rather than a
+#: denylist: each name is a measured kiro-cli tuning knob (its tokio and rayon
+#: pools), and any other variable would reach every process the agent runs --
+#: tools, MCP servers, the operator's own programs -- where no denylist could
+#: enumerate every loader, proxy, certificate or interpreter variable that
+#: changes what that code does.
+CHILD_ENV_DEFAULT_NAMES = frozenset({"TOKIO_WORKER_THREADS", "RAYON_NUM_THREADS"})
+
+#: Inclusive bounds of a thread-pool size. Zero is refused because the two
+#: runtimes disagree on it (rayon reads it as "use the default", tokio refuses
+#: it); leaving the key out already gets the default.
+CHILD_ENV_DEFAULT_MIN = 1
+CHILD_ENV_DEFAULT_MAX = 1024
+
+
+def coerce_child_env_defaults(raw: object) -> dict[str, str]:
+    """Normalize ``agent.child_env_defaults`` to an allowlisted thread-pool map.
+
+    Unlike :func:`coerce_deepseek_env`, an invalid entry here is DROPPED with a
+    warning rather than refused at spawn: these are optional tuning defaults
+    (thread-pool caps), so a typo must cost that one default, never a session.
+    A name must be one of :data:`CHILD_ENV_DEFAULT_NAMES`; a value must be a
+    string of ASCII digits whose integer is in
+    [:data:`CHILD_ENV_DEFAULT_MIN`, :data:`CHILD_ENV_DEFAULT_MAX`], stored in
+    canonical ``str(int)`` form (``"04"`` becomes ``"4"``). Nothing is stripped.
+    The warning names the key only, never the value.
+    """
+    if not isinstance(raw, dict):
+        if raw is not None:
+            logger.warning("agent.child_env_defaults is not a mapping; ignoring it")
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if key not in CHILD_ENV_DEFAULT_NAMES:
+            logger.warning(
+                "agent.child_env_defaults: ignoring %r, only %s are accepted",
+                key if isinstance(key, str) else type(key).__name__,
+                ", ".join(sorted(CHILD_ENV_DEFAULT_NAMES)),
+            )
+            continue
+        # isascii()+isdigit() rejects signs, spaces, underscores and non-ASCII
+        # digits that int() would otherwise accept; the length cap keeps int()
+        # off pathological inputs.
+        count = (
+            int(value)
+            if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 8
+            else 0
+        )
+        if not CHILD_ENV_DEFAULT_MIN <= count <= CHILD_ENV_DEFAULT_MAX:
+            logger.warning(
+                "agent.child_env_defaults: ignoring %s, the value must be a decimal "
+                "integer string from %d to %d",
+                key,
+                CHILD_ENV_DEFAULT_MIN,
+                CHILD_ENV_DEFAULT_MAX,
+            )
+            continue
+        out[key] = str(count)
+    return out
+
+
 def coerce_effort(raw: object) -> str:
     """Normalize ONE reasoning-effort value to a level, or ``""`` for inherit.
 
@@ -1432,6 +1493,24 @@ class AgentConfig:
             restart=True,
         ),
     )
+    child_env_defaults: dict[str, str] = field(
+        default_factory=dict,
+        metadata=_meta(
+            "kiro-cli Child Env Defaults",
+            "Environment variables given to every spawned kiro-cli process (chat "
+            "sessions, background sessions and subagents) ONLY when the variable "
+            "is not already set in the environment it inherits. Empty by default. "
+            "kiro-cli sizes its thread pools by core count, so on a many-core host "
+            "running dozens of kiro-cli processes they can be capped, e.g. "
+            '{"TOKIO_WORKER_THREADS": "4", "RAYON_NUM_THREADS": "4"}. Only '
+            "TOKIO_WORKER_THREADS and RAYON_NUM_THREADS are accepted, each a "
+            "decimal integer string from 1 to 1024; any other "
+            "entry is ignored with a warning. Kiro Crew's own agent environment "
+            "scrub still applies. Every process the agent runs (tools, MCP servers, "
+            "your own programs) inherits these variables too. Takes effect on the "
+            "next spawn.",
+        ),
+    )
     adaptive_concurrency: bool = field(
         default=True,
         metadata=_meta(
@@ -1840,6 +1919,7 @@ class AgentConfig:
         # names and values may BE is refused at spawn, by name -- see
         # coerce_deepseek_env.
         self.deepseek_env = coerce_deepseek_env(self.deepseek_env)
+        self.child_env_defaults = coerce_child_env_defaults(self.child_env_defaults)
         # Same defensive coercion for the throttle-fallback model: normalize to
         # ""/"auto"/acp id, so consumers can trust the stored shape.
         self.fallback_model = coerce_fallback_model(self.fallback_model)

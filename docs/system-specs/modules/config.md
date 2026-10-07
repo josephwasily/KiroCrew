@@ -1264,7 +1264,7 @@ deleted in memory stays deleted — restore fills into existing records only.
 
 A top-level key the core does not model is captured into `_extra_sections` and
 round-tripped, and by default also reported as `Config: unrecognized top-level
-keys`. Two exclusions from that warning are named in code:
+keys`. Three exclusions from that warning are named in code:
 
 - `CONFIG_RESERVED_TOP_KEYS` in `resolution.py` (`meta`, retired keys) — stamped
   by `save()` itself or written by an older build; never parsed, never
@@ -1275,6 +1275,17 @@ keys`. Two exclusions from that warning are named in code:
   section, and NOT reported as unrecognized: the product told the operator to
   write it. Private to the warning that is its only consumer; a second member
   is the point at which this becomes an app-declared registration.
+- `validation._CORE_OWNED_TOP_KEYS` (`voice_reply`) — a section this core itself
+  writes and reads but does not model as a field. The settings UI persists it
+  (`slack/interactions.py`, `dashboard/chat_voice.py`) and the gateway reads it
+  back on startup via `load_voice_reply_config` (`slack/handler_runtime/voice.py`,
+  and read by `telegram/transport_dispatch.py`). Captured and round-tripped like any unknown
+  section, and NOT reported as unrecognized because the product wrote it itself.
+  A separate set from `_APP_OWNED_TOP_KEYS` because the owner is core, not an
+  app: it has no manifest to declare itself through, so the "second member →
+  app-declared registration" trigger on the app-owned set does not apply to it.
+  Both sets exempt only the shape the reader keeps — a JSON object — so a scalar
+  value still warns.
 
 A deprecated field is announced only when it holds something: `null` and an
 empty map, list or string carry nothing to migrate, so `validation` stays
@@ -2573,6 +2584,7 @@ class AgentConfig:
     subagent_queue_max_wait_secs: int = 1800  # DEFAULT_SUBAGENT_QUEUE_MAX_WAIT_SECS; longest a spawn deferred by spawn_min_memory_gb or the posture gate stays parked (time spent eligible, queued for a slot, is not counted) before it ends as 'never started: waiting for memory' (delivered, depth 0). Also the per-start and per-episode bound of the macOS kernel memory-pressure hold. 0 = no bound. Load-time clamped to [0, 86400]. Live (SubagentManager.LIVE_CONFIG_PATHS). See modules/subagent.md § Durable task queue and § macOS: the kernel memory-pressure hold
     start_collect_timeout_secs: int = 300  # how long the session-start gate's StartCollector keeps a timed-out session/new (row `recovering`) to adopt a late answer before the attempt is abandoned. Load-time clamped to [10, 3600]; restart=True
     session_start_concurrency: int | str = "auto"  # ACP session/new requests outstanding per gateway event loop (SessionStartGate; fixed, not adaptive). Queue time behind it is not start time. "auto" is sized once per process by session_start_sizing: clamp(min(cpus // 4, available_GB // 3), 2, 16), cpus = affinity capped by cgroup v2 cpu.max; an integer is load-time clamped to [1, 64]; junk falls back to "auto"; restart=True
+    child_env_defaults: dict[str, str] = {}  # env vars set on every spawned kiro-cli child (AcpRuntime via KiroHarness/KasHarness.apply_spawn_env, auxiliary AcpClient via _resolve_spawn_env(kiro_api_key=True)) ONLY when the key is absent from the inherited env (ambient or per-session overlay; an explicit empty value wins). Applied before the agent-env scrub. Opt-in tuning, e.g. {"TOKIO_WORKER_THREADS": "4", "RAYON_NUM_THREADS": "4"} to cap kiro-cli's core-count-sized pools. Allowlist only (CHILD_ENV_DEFAULT_NAMES): TOKIO_WORKER_THREADS and RAYON_NUM_THREADS, each a decimal integer string (ASCII digits, nothing stripped) in [1, 1024], stored as str(int) ("04" -> "4"); any other name or value is dropped with a warning (key named, never value). Live (next spawn). See acp/child_env_defaults.py
     lane_weights: dict[str, int] = {}    # per-lane weight overrides keyed by root session key or 'system'; unlisted lanes weigh 1, and a weight shapes the share of picks, never a hard cap. Each value load-time clamped to [1, 64]; non-string and empty keys dropped. Live
     child_reserve: int = 1               # execution slots a depth-0 task may never take while a nested task is queued or a parent waits on children; also lifts an adaptive squeeze to adaptive_floor + child_reserve while a parent waits (never above max_subagents). 0 disables. Load-time clamped to [0, 8]. Live. See modules/subagent.md § Fairness lanes and the child reserve
     recovery_backoff_base_secs: float = 2.0    # first retry delay of the shared recovery ladder (tool call / backend / ACP runtime) and of a dependency wait; doubles with equal jitter. Snapshotted onto the process ladder by `recovery.ladder.configure_default_ladder(cfg)` in `GatewayOrchestrator._init_subagents`; the gatewayd supervisor's rung is pinned and does not follow it, and the two import-time readers (`acp/client._ACP_RESPAWN_BACKOFF_S`, `taskq/model.recovery_backoff_secs`) keep the static defaults. Load-time clamped to [0.1, 60]; restart=True. See modules/session.md § Recovery ladder

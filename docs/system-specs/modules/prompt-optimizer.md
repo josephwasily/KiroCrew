@@ -21,7 +21,7 @@ There is no client- or server-side heuristic that decides whether a nonempty pro
 
 ## Paste forwarding
 
-The chat input collapses a large paste into an inline `[ Paste #N · M lines ]` placeholder and retains the source text in a `PasteBlock` list in `website/src/utils/pasteTokens.ts`. `optimizePrompt` forwards only blocks referenced by the current draft, so the optimizer can use the content for scope without expanding it into the rewritten draft.
+The chat input collapses a large paste into an inline `[ Paste #N · M lines ]` placeholder and retains the source text in a `PasteBlock` list in `website/src/utils/pasteTokens.ts`. `optimizePrompt` forwards only blocks referenced by the current draft, so the optimizer can use the content for scope without expanding it into the rewritten draft. The placeholder also carries the block's stable id between two U+2063 (INVISIBLE SEPARATOR) fences right after `#N` so a recalled token pairs to its own block rather than to a reused sequence number; the id renders as nothing and the backend's `PASTE_TOKEN_REGEX` matches it as an optional group, so paste-content scoping and the placeholder-preservation guard below are unaffected.
 
 `_build_pasted_content_block` accepts only referenced, well-formed blocks, keeps the first block for each sequence, orders them by sequence, and bounds both scanned blocks and forwarded content. The content limit protects model context and request latency; `TestBuildPastedContentBlock.test_truncates_over_budget` pins its truncation behavior. Malformed or unreferenced `pastes` entries produce no forwarded section instead of failing the request.
 

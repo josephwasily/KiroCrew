@@ -16,9 +16,27 @@ from typing import Literal
 
 from kiro_crew import agent as agent_mod
 from kiro_crew import agent_state, user_json
-from kiro_crew.agent_files import OWNED_KIRO_AGENT_FILES
+from kiro_crew.agent_files import DASHBOARD_AUTHOR_AGENT_FILENAME, OWNED_KIRO_AGENT_FILES
 from kiro_crew.agent_materialization import auto_approve
 from kiro_crew.agent_spec_format import is_markdown_spec
+
+#: The dashboard-author origin stem, digest-gated in :func:`_origin_is_owned`.
+_DASHBOARD_AUTHOR_STEM = Path(DASHBOARD_AUTHOR_AGENT_FILENAME).stem
+
+
+def _dashboard_author_file_is_installers(path: Path) -> bool:
+    """True ONLY when the file at *path* positively confirms as the managed dashboard-author
+    spec -- its bytes reproduce the installer-recorded ownership digest.
+
+    Fail-closed: an ABSENT or unreadable file -- for example a user-owned ``.md`` at the stem
+    with a JSON crew fork, where the capped reader returns ``None`` -- is NOT confirmed ours,
+    so this returns False and the fork refresh leaves the fork's custom ``preToolUse`` guards
+    in place rather than replacing them with bundled hooks. A lazy import avoids an import
+    cycle at module load."""
+    from kiro_crew.agent_materialization import worker_agent
+
+    spec = agent_mod._read_spec_capped(path)
+    return worker_agent._is_confirmed_managed_dashboard_author(spec)
 
 
 def refresh_after_rebuild(
@@ -189,13 +207,54 @@ def _refresh_forked_templates_locked(*, gated_off: "frozenset[str] | None" = Non
         while name in forks and name not in seen:
             seen.add(name)
             name = forks[name]["forked_from"]
-        return name in owned_names
+        if name not in owned_names:
+            return False
+        # The dashboard-author stem was a user-creatable template name before it became
+        # owned, so a pre-upgrade fork can descend from a USER template at this stem.
+        # Treating that origin as owned here would overwrite the fork's hooks and MCP
+        # plumbing with the managed set. Count it as an owned origin ONLY when the on-disk
+        # origin spec reproduces the installer-recorded ownership digest -- the same gate the
+        # installer, the capability-parent check and the home probe apply. Other owned
+        # origins keep the plain check.
+        if name == _DASHBOARD_AUTHOR_STEM:
+            origin_path = agent_mod.kiro_agents_dir_path() / (name + ".json")
+            return _dashboard_author_file_is_installers(origin_path)
+        return True
 
     agents_dir = agent_mod.kiro_agents_dir_path()
     failures: set[str] = set()
+
+    def _owned_spec_has_its_own_writer(name: str) -> bool:
+        """Does the fork named *name* genuinely have an owned-spec writer that re-filters
+        its grants, so this governance loop may skip it?
+
+        A plain owned stem (worker, conductor, service agents) always does -- its installer
+        runs every rebuild. The dashboard-author stem is the exception: it was a
+        user-creatable template name before it became owned, so a pre-upgrade PRIVATE COPY
+        can sit at this stem with NO owned writer re-filtering it. Skipping such a file as
+        "owned" would leave its ``allowedTools``/``autoApprove`` live against a tightened
+        ceiling forever (``require_fork_governance`` then admits sessions on it). So for
+        this stem the skip is honoured ONLY when the managed install would actually LAND on
+        the ``.json`` -- it reproduces the installer-recorded ownership digest AND no user
+        ``.md`` sibling makes the installer refuse. A private copy that reproduces the digest
+        but sits beside a ``.md`` (so the installer refuses and never re-filters it), or any
+        unconfirmed copy, falls through to the governance passes below rather than being
+        skipped as owned.
+        """
+        if name not in owned_names:
+            return False
+        if name == _DASHBOARD_AUTHOR_STEM:
+            from kiro_crew.agent_materialization import worker_agent
+
+            spec_path = agents_dir / (name + ".json")
+            return worker_agent._managed_dashboard_author_install_lands(spec_path)
+        return True
+
     for fork_name in sorted(forks):
-        # Owned specs have their own writer; this path must never touch them.
-        if fork_name in owned_names:
+        # Owned specs have their own writer; this path must never touch them -- EXCEPT an
+        # unconfirmed private copy at the dashboard-author stem, which has no owned writer
+        # and must still be governance-filtered here (see _owned_spec_has_its_own_writer).
+        if _owned_spec_has_its_own_writer(fork_name):
             continue
         if not _binding_corroborates(fork_name):
             # Defense in depth (the sidecar is sealed and its writers gated):

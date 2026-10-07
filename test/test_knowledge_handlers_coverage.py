@@ -1545,6 +1545,25 @@ class TestSearchForContext:
         assert data["results"] == []
 
     @pytest.mark.asyncio
+    async def test_wrong_typed_fetch_config_falls_back_to_defaults(
+        self, store, monkeypatch, tmp_path
+    ):
+        """A hand-edited non-numeric ``fetch_top_n`` / ``fetch_max_tokens``
+        degrades to the defaults, so the read-only GET returns 200 rather than
+        letting a non-int reach ``int()``."""
+        (tmp_path / "config.json").write_text(
+            json.dumps({"knowledge": {"fetch_top_n": [], "fetch_max_tokens": {}}})
+        )
+        monkeypatch.setattr(f"{MODULE}.data_home", lambda: tmp_path)
+        _patch_retriever(monkeypatch, [])
+        async with _client(_make_app(store)) as client:
+            resp = await client.get("/api/knowledge/search-for-context", params={"q": "z"})
+            assert resp.status == 200
+            data = await resp.json()
+        assert data["max_tokens"] == kh.KNOWLEDGE_FETCH_MAX_TOKENS
+        assert data["results"] == []
+
+    @pytest.mark.asyncio
     async def test_non_numeric_limit_falls_back_to_top_n(self, store, monkeypatch, tmp_path):
         monkeypatch.setattr(f"{MODULE}.data_home", lambda: tmp_path)
         captured = {}

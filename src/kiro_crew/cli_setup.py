@@ -30,6 +30,7 @@ from kiro_crew.config.loader import (
     EnvFileWideEncodingError,
     _default_workspace_base,
     _workspace_dir_file,
+    coerce_config_field,
     config_path,
     env_bom_prefix,
     env_path,
@@ -1053,7 +1054,11 @@ def _setup_slash_command() -> None:
     if slack_section is not None and not isinstance(slack_section, dict):
         print("  ⚠️  'slack' section is not an object; leaving config untouched.\n")
         return
-    current = (slack_section or {}).get("command", "kirocrew")
+    # A wrong-typed ``command`` (an operator typo in config.json) must not take
+    # the wizard down: it is assigned into ``raw`` below and then fed to a char
+    # loop that raises TypeError on a non-string. Coerce it to the default the
+    # way the validated loader degrades a mistyped field.
+    current = coerce_config_field(slack_section or {}, "command", str, "kirocrew")
     # EOF keeps the current value (same reasoning as the workspace step).
     raw = _input_or_skip(f"  Slash command name [{current}]: ") or ""
     if raw:

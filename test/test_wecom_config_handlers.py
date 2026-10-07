@@ -575,3 +575,20 @@ def test_set_config_write_failure_preserves_process_only_credential(
     assert SECRET not in env_text, ".env must not be written when config write fails (WECOM_SECRET)"
     monkeypatch.delenv("WECOM_BOT_ID", raising=False)
     monkeypatch.delenv("WECOM_SECRET", raising=False)
+
+
+def test_save_survives_wrong_typed_stored_allowed_users(tmp_path: Path, monkeypatch) -> None:
+    """A hand-edited non-list ``allowed_users`` in config.json degrades to
+    empty, so the saver's comprehension and ``list(...)`` comparison do not run
+    on a non-iterable and the save still applies."""
+    import kiro_crew.dashboard.handlers.messaging as mod
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"wecom": {"allowed_users": 123}}), encoding="utf-8")
+    (status_body, _env) = _client_put(
+        mod, monkeypatch, tmp_path, {"allowed_user_ids": ["zhangsan"]}
+    )
+    status, _ = status_body
+    assert status == 200
+    saved = json.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["wecom"]["allowed_users"] == [{"userid": "zhangsan", "name": ""}]

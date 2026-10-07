@@ -54,6 +54,7 @@ from kiro_crew.agent import (  # noqa: F401
     AGENT_FILENAME,
     OWNED_KIRO_AGENT_FILES,
     _atomic_json_write,
+    _is_confirmed_managed_dashboard_author,
     _refresh_forked_templates,
     _spec_path_is_safe,
     agents_spec_lock,
@@ -74,7 +75,10 @@ from kiro_crew.agent_discovery import (  # noqa: F401
     spec_model,
     spec_str,
 )
-from kiro_crew.agent_files import KAS_RESERVED_AGENT_IDS  # noqa: F401
+from kiro_crew.agent_files import (  # noqa: F401
+    DASHBOARD_AUTHOR_AGENT_FILENAME,
+    KAS_RESERVED_AGENT_IDS,
+)
 from kiro_crew.agent_sdk.capabilities import capabilities_for, capabilities_of
 from kiro_crew.agent_sdk.drivers.acp import (
     EntitlementRevalidating,

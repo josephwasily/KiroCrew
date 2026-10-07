@@ -16,7 +16,7 @@ from kiro_crew.channel import (
     _shell_base_binary,
     run_channel_agent,
 )
-from kiro_crew.config.loader import config_path, read_config_text
+from kiro_crew.config.loader import coerce_config_field, config_path, read_config_text
 from kiro_crew.sel import sel
 
 if TYPE_CHECKING:
@@ -160,7 +160,7 @@ def _load_presets() -> object:
     except (OSError, json.JSONDecodeError):
         # Malformed config — fall through to defaults
         pass
-    presets = config.get("channel_presets", _DEFAULT_PRESETS)
+    presets = coerce_config_field(config, "channel_presets", list, _DEFAULT_PRESETS)
     _presets_cache = (key, presets)
     return presets
 

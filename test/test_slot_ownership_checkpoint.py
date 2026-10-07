@@ -1120,6 +1120,57 @@ class TestTranscriptOwnershipWithoutALiveSlot:
             assert "a1" not in state._slots_under_construction
 
     @pytest.mark.asyncio
+    async def test_a_lock_outlasting_one_reads_budget_but_not_the_handlers_publishes(
+        self, state, monkeypatch
+    ) -> None:
+        """A reopen re-read waits out a lock longer than one read's own retry budget.
+
+        The post-reopen re-reads open a file this resume just rewrote. On a loaded
+        Windows runner the transient hold can outlast ``get_metadata_status``'s own
+        bounded retry, which then reports unreadable and would refuse. The handler
+        re-reads a few more times off the loop, so a hold that clears within that
+        wider window lets the read succeed and the resume publishes. The fault
+        budget here exceeds one read's attempts but not the handler's, so a read
+        with no extra retries would refuse and the extra retries are what carry it.
+        Not run on a real Windows host.
+        """
+        import builtins
+
+        from kiro_crew.history import _METADATA_READ_ATTEMPTS
+
+        await _persist_and_close(state, state.get_or_create_slot("a1", app=APP))
+        log = state.conversation_log
+        target = str(log._path("dashboard:a1"))
+        real_open = builtins.open
+        real_clear = log.clear_closed
+        armed = {"on": False}
+        # More faults than one read's internal budget (so a single read reports
+        # unreadable), but few enough that the handler's extra off-loop re-reads
+        # clear the hold.
+        fail_budget = {"n": _METADATA_READ_ATTEMPTS + 2}
+
+        def clear_closed(key, **kw):
+            out = real_clear(key, **kw)
+            armed["on"] = True
+            return out
+
+        def flaky_open(file, *args, **kwargs):
+            if armed["on"] and str(file) == target and fail_budget["n"] > 0:
+                fail_budget["n"] -= 1
+                raise PermissionError("ERROR_SHARING_VIOLATION (simulated)")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(log, "clear_closed", clear_closed)
+        monkeypatch.setattr(builtins, "open", flaky_open)
+        async with _client(state, APP) as client:
+            resp = await client.post("/api/chat/slots/a1/resume", json={})
+            body = await resp.text()
+        assert fail_budget["n"] == 0, "the simulated transient did not fully clear"
+        assert resp.status == 200, body
+        assert state._slots["a1"]._app == APP
+        assert "a1" not in state._slots_under_construction
+
+    @pytest.mark.asyncio
     async def test_a_delete_finishing_inside_the_final_offloop_read_refuses(
         self, state, monkeypatch
     ) -> None:

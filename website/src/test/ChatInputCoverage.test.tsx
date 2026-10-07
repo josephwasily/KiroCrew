@@ -382,7 +382,7 @@ describe('ChatInput paste: caret lands after the inserted content', () => {
     // Long enough to collapse into a "[ Paste #1 · N lines ]" chip.
     pasteText(ta, Array.from({ length: 12 }, (_, i) => `payload line ${i}`).join('\n'))
     expect(onBlocks).toHaveBeenCalledTimes(1)
-    expect(ta.value).toMatch(/^\[ Paste #1 · 12 lines \]$/)
+    expect(ta.value).toMatch(/^\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 12 lines \]$/)
     await nextFrame()
     expect(ta.selectionStart).toBe(ta.value.length)
   })
@@ -406,7 +406,7 @@ describe('ChatInput paste tokens: blockquote prefix keeps the chip on the quote 
     ta.focus()
     ta.setSelectionRange(2, 2)
     pasteText(ta, bigPaste)
-    expect(ta.value).toBe('> [ Paste #1 · 12 lines ]')
+    expect(ta.value).toMatch(/^> \[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 12 lines \]$/)
     await nextFrame()
     expect(ta.selectionStart).toBe(ta.value.length)
   })
@@ -416,7 +416,7 @@ describe('ChatInput paste tokens: blockquote prefix keeps the chip on the quote 
     ta.focus()
     ta.setSelectionRange(4, 4)
     pasteText(ta, bigPaste)
-    expect(ta.value).toBe('> > [ Paste #1 · 12 lines ]')
+    expect(ta.value).toMatch(/^> > \[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 12 lines \]$/)
   })
 
   it('a quote prefix on a LATER line flows too (earlier lines untouched)', () => {
@@ -425,7 +425,7 @@ describe('ChatInput paste tokens: blockquote prefix keeps the chip on the quote 
     ta.focus()
     ta.setSelectionRange(initial.length, initial.length)
     pasteText(ta, bigPaste)
-    expect(ta.value).toBe('as discussed:\n> [ Paste #1 · 12 lines ]')
+    expect(ta.value).toMatch(/^as discussed:\n> \[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 12 lines \]$/)
   })
 
   it('an indented quote prefix ("  > ") flows', () => {
@@ -433,7 +433,7 @@ describe('ChatInput paste tokens: blockquote prefix keeps the chip on the quote 
     ta.focus()
     ta.setSelectionRange(4, 4)
     pasteText(ta, bigPaste)
-    expect(ta.value).toBe('  > [ Paste #1 · 12 lines ]')
+    expect(ta.value).toMatch(/^  > \[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 12 lines \]$/)
   })
 
   it('ordinary text before the caret still pushes the chip to its own line', () => {
@@ -443,7 +443,7 @@ describe('ChatInput paste tokens: blockquote prefix keeps the chip on the quote 
     ta.focus()
     ta.setSelectionRange(5, 5)
     pasteText(ta, bigPaste)
-    expect(ta.value).toBe('see: \n[ Paste #1 · 12 lines ]')
+    expect(ta.value).toMatch(/^see: \n\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 12 lines \]$/)
   })
 
   it('a line of only whitespace (no ">") still pushes the chip to its own line', () => {
@@ -453,7 +453,7 @@ describe('ChatInput paste tokens: blockquote prefix keeps the chip on the quote 
     ta.focus()
     ta.setSelectionRange(3, 3)
     pasteText(ta, bigPaste)
-    expect(ta.value).toBe('   \n[ Paste #1 · 12 lines ]')
+    expect(ta.value).toMatch(/^   \n\[ Paste #1(?:\u2063[\u200b\u200c]+\u2063)? · 12 lines \]$/)
   })
 })
 

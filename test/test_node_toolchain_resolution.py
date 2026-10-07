@@ -267,6 +267,8 @@ def test_no_toolchain_anywhere_returns_empty(isolated_home):
     ".nvm/versions/node/{v}/bin",
     ".local/share/fnm/node-versions/{v}/installation/bin",
     ".fnm/node-versions/{v}/installation/bin",
+    # macOS default: fnm uses ~/Library/Application Support/fnm, not XDG.
+    "Library/Application Support/fnm/node-versions/{v}/installation/bin",
 ])
 def test_each_version_manager_layout_is_found(isolated_home, layout):
     d = _fake_node_bin(isolated_home / layout.format(v="v20.1.0"))

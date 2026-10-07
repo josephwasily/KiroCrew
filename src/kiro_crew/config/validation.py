@@ -52,6 +52,29 @@ from kiro_crew.config.fields import _coerce_bool
 #     and prescribed by the dashboard's "no checkout found" banner.
 _APP_OWNED_TOP_KEYS: frozenset = frozenset({"dev_fleet"})
 
+# Top-level config.json sections THIS CORE itself writes and reads, but does not
+# model as a dataclass field. The settings UI persists them into config.json and
+# a core module reads them back on startup -- so, exactly like the keys save()
+# stamps (CONFIG_RESERVED_TOP_KEYS), the product wrote them itself and warning
+# "unrecognized" about them is a false positive. They differ from the reserved
+# keys in that they carry live operator settings that must survive save(): the
+# loader captures them into _extra_sections and re-emits them via to_dict(), so
+# they are NOT reserved (reserved keys are dropped on save). They differ from
+# _APP_OWNED_TOP_KEYS only in who owns the reader -- core here, a builtin app
+# there -- which is why they are a separate set and the "second member becomes a
+# registration mechanism" note on the app-owned set does not govern this one:
+# a core-owned section has no manifest to declare itself through.
+# Excluded only in the shape the reader keeps -- a JSON object -- so a scalar
+# written by hand keeps the one warning that says it is being ignored.
+#   * voice_reply -- the dashboard/Slack voice settings block. Written by
+#     slack/interactions.py (``data.setdefault("voice_reply", {})``) and
+#     dashboard/chat_voice.py (persisted with json.dump), and read back on
+#     startup by slack/handler_runtime/voice.py::load_voice_reply_config
+#     (``cfg.raw.get("voice_reply")``), and also by
+#     telegram/transport_dispatch.py (``raw.get("voice_reply")``). No
+#     SCHEMA_REGISTRY entry.
+_CORE_OWNED_TOP_KEYS: frozenset = frozenset({"voice_reply"})
+
 try:
     import jsonschema
 
@@ -467,17 +490,22 @@ def validate_config_data(data: dict) -> dict:
     # config's *sections*, so the keys save() stamps itself are not in it and
     # must be excluded — otherwise every load of a config Kiro Crew has ever
     # saved warns about Kiro Crew's own bookkeeping. A section a builtin app owns
-    # and reads from the file directly (_APP_OWNED_TOP_KEYS) is not in the
-    # registry either, and is excluded for the same reason: the product told the
-    # operator to write it. Excluded only in the shape the app reads -- a JSON
-    # object. The app's reader keeps only a dict (repository.py
-    # ``isinstance(raw.get("dev_fleet"), dict)``) and silently falls back to
-    # discovery on anything else, so a scalar ``dev_fleet: "/opt/kc"`` would
+    # and reads from the file directly (_APP_OWNED_TOP_KEYS), or that this core
+    # writes and reads without a dataclass model (_CORE_OWNED_TOP_KEYS), is not
+    # in the registry either and is excluded for the same reason: the product
+    # told the operator to write it, or wrote it itself. Excluded only in the
+    # shape the reader keeps -- a JSON object. A reader keeps only a dict and
+    # silently falls back on anything else, so a scalar written by hand would
     # otherwise lose the one warning that tells the operator it is being ignored.
     known_top_keys = {e.path for e in SCHEMA_REGISTRY if "." not in e.path and e.path != "*"}
     app_owned_sections = {k for k in _APP_OWNED_TOP_KEYS if isinstance(data.get(k), dict)}
+    core_owned_sections = {k for k in _CORE_OWNED_TOP_KEYS if isinstance(data.get(k), dict)}
     unknown = sorted(
-        set(data.keys()) - known_top_keys - CONFIG_RESERVED_TOP_KEYS - app_owned_sections
+        set(data.keys())
+        - known_top_keys
+        - CONFIG_RESERVED_TOP_KEYS
+        - app_owned_sections
+        - core_owned_sections
     )
     if unknown:
         logger.warning("Config: unrecognized top-level keys: %s", ", ".join(unknown))

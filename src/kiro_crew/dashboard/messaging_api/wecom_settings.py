@@ -133,6 +133,7 @@ async def _wecom_config_save_locked(request: web.Request) -> web.Response:
         CRED_WECOM_BOT_ID,
         CRED_WECOM_SECRET,
         ConfigReadError,
+        coerce_config_field,
         config_path,
     )
 
@@ -245,11 +246,13 @@ async def _wecom_config_save_locked(request: web.Request) -> web.Response:
             return _deny("allowed_user_ids must be a list")
         # Preserve stored display names for entries that survive the edit —
         # the UI round-trips only userids, but ``{userid, name}`` is the
-        # canonical config shape consumed by the transport allow-list.
+        # canonical config shape consumed by the transport allow-list. The
+        # stored value is coerced to a list first so a wrong-typed
+        # ``allowed_users`` degrades to empty for both the lookup and the
+        # change comparison below.
+        stored_users = coerce_config_field(wc_cfg, "allowed_users", list, [])
         existing = {
-            str(u.get("userid")): u
-            for u in wc_cfg.get("allowed_users", [])
-            if isinstance(u, dict) and u.get("userid")
+            str(u.get("userid")): u for u in stored_users if isinstance(u, dict) and u.get("userid")
         }
         new_users: list[dict] = []
         seen: set[str] = set()
@@ -263,7 +266,7 @@ async def _wecom_config_save_locked(request: web.Request) -> web.Response:
                 continue
             seen.add(s)
             new_users.append(existing.get(s) or {"userid": s, "name": ""})
-        if new_users != list(wc_cfg.get("allowed_users", [])):
+        if new_users != stored_users:
             staged["allowed_users"] = new_users
             applied.append("allowed_users")
 

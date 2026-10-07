@@ -14,6 +14,8 @@ from aiohttp import web
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_handlers import (
+        _REOPEN_REREAD_EXTRA_ATTEMPTS,
+        _REOPEN_REREAD_RETRY_SECS,
         _RESUME_APP_NOT_FOUND,
         _STRUCTURED_CONTENT_MAX_CHARS,
         _STRUCTURED_CONTENT_PLACEHOLDER,
@@ -1520,6 +1522,33 @@ async def resume_slot_from_history(
                 )
             return None
 
+        async def _status_riding_transient(log: Any, key: str) -> tuple[dict, bool]:
+            """``get_metadata_status`` off the loop, waiting out a transient lock.
+
+            The two re-reads below read a session file this resume JUST rewrote
+            (the ``clear_closed`` atomic rename, or the clear plus the publish-side
+            activity around it). On Windows that file is briefly unopenable while
+            an indexer or AV scanner holds it, and on a loaded runner the hold can
+            outlast ``get_metadata_status``'s own bounded retry, which then reports
+            ``readable=False``. An unreadable read must stay fail-closed -- the
+            caller refuses on it, because the in-process witnesses cannot see a
+            cross-process delete/recreate while the file is unopenable -- so the
+            cure is to let the read SUCCEED, not to publish without it: re-read a
+            few more times, pausing off the loop, so the brief hold clears and the
+            real identity + marker checks run on a readable line. A line that is
+            genuinely gone or corrupt stays unreadable across the extra tries and
+            the caller still refuses, exactly as it would without them -- this only
+            widens the window a transient lock has to clear, it never accepts an
+            unreadable line.
+            """
+            meta, readable = await asyncio.to_thread(log.get_metadata_status, key)
+            attempt = 0
+            while not readable and attempt < _REOPEN_REREAD_EXTRA_ATTEMPTS:
+                await asyncio.sleep(_REOPEN_REREAD_RETRY_SECS)
+                attempt += 1
+                meta, readable = await asyncio.to_thread(log.get_metadata_status, key)
+            return meta, readable
+
         # ONE arm for every await between the retraction and the publish. A
         # cancellation (the task torn down mid-resume) is a ``BaseException``,
         # and an ``except Exception`` on any of these awaits would let it skip
@@ -1578,9 +1607,7 @@ async def resume_slot_from_history(
                     await asyncio.to_thread(
                         log.clear_closed, history_key, only_if_closed_before=resume_started_at
                     )
-                    _after, _readable = await asyncio.to_thread(
-                        log.get_metadata_status, history_key
-                    )
+                    _after, _readable = await _status_riding_transient(log, history_key)
                 except Exception:
                     logger.warning("Failed to clear closed flag for %s", history_key, exc_info=True)
                     return ResumeOutcome(
@@ -1631,9 +1658,7 @@ async def resume_slot_from_history(
             # EITHER await.
             last_cache_gen = log._cache_gen(history_key)
             try:
-                _last, _last_readable = await asyncio.to_thread(
-                    log.get_metadata_status, history_key
-                )
+                _last, _last_readable = await _status_riding_transient(log, history_key)
             except Exception:
                 _last, _last_readable = {}, False
             refusal = _identity_refusal(_last, _last_readable)

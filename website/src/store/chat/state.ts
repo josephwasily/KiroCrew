@@ -269,6 +269,16 @@ export interface ChatState {
    *  for ErrorNotice's agent hand-off. Cleared on dismiss or on the next attempt. */
   undeletableHistory: HistoryDeleteRefusal | null
   pendingInput: string | null
+  /** Text staged from the Side Chat into the main composer, keyed by the slot
+   *  it belongs to. Kept apart from `pendingInput` because it APPENDS to the
+   *  live composer rather than replacing it, and keyed by `slot` because a Side
+   *  Chat exists on more than one host (the dashboard ChatPage AND a Crew
+   *  Member's ChatPane): each host consumes the hand-off ONLY when the staged
+   *  slot matches the slot it is showing, so a member's hand-off can never land
+   *  in the dashboard composer of another session. The consumer merges it
+   *  against the live draft before seeding, so a hand-off never clobbers what
+   *  the user is typing. */
+  mainComposerAppend: { slot: string; text: string } | null
   /** Transient feedback for agent-rebind failures shared by the picker and
    *  global cycle shortcuts. The App shell owns rendering and expiry. */
   agentSwitchNotice: { message: string } | null
@@ -379,6 +389,16 @@ export interface ChatState {
    *  turn issues can supersede it and still keep the rows it never fetched.
    *  Absent once superseded, so the upgrade happens at most once per slot. */
   slotPaneBounded: Record<string, number>
+  /** A BACKGROUND pane's own paging cursor: the `next_before` offset that
+   *  addresses the rows just older than `slotMessages[slot][0]`. Present only
+   *  while the pane's marker says more history exists and the writer knew the
+   *  offset; `writeSlotPage` keeps it beside the array it describes. The active
+   *  slot pages with `slotOldestIndex` instead. */
+  slotPaneNextBefore?: Record<string, number>
+  /** A background pane's older-page fetch in flight, and whether its last one
+   *  failed. Per slot, so one pane's walk never blocks or reddens another's. */
+  slotPaneLoadingOlder?: Record<string, boolean>
+  slotPaneOlderError?: Record<string, boolean>
   /** The server's own message count for a slot, as of the last slot-detail fetch.
    *
    *  This exists to tell two indistinguishable populations apart at the warm
@@ -529,6 +549,7 @@ export const initialState: ChatState = {
   lastResumeRequestId: null,
   undeletableHistory: null,
   pendingInput: null,
+  mainComposerAppend: null,
   agentSwitchNotice: null,
   creatingSlot: false,
   foregroundCreateId: null,

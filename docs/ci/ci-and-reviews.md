@@ -96,6 +96,12 @@ Three structural facts explain most of the rest:
   `merge-queue-ruleset.yml` reads main's live rules every 6 hours
   (`scripts/check_merge_queue_ruleset.py`) and goes red when `merge_queue` is
   not among them; `scheduled-failure-watch.yml` turns that red into one issue.
+  The same shape covers an npm fact no diff shows: the installer tracks
+  `@playwright/cli@latest`, so the daily `playwright-cli-banner.yml` launches
+  that release once (`show --port 0`) and fails when
+  `scripts/check_playwright_cli_banner.py` cannot parse its `Listening on`
+  banner with the Browser view's own parser, naming the CLI version and the
+  lines read.
 - **Merge queue:** every test workflow runs on `merge_group`, the tree that
   actually lands: `ci.yml`, `fast-gate.yml` and `build.yml` on the fleet with
   the diff-scoped gates diffing against the group's `merge_group.base_sha`,
@@ -665,6 +671,9 @@ runs from listed actors. The three non-agentic code-review checks use the PR
 route; the merge-conflict label job and the reusable wheel/dependency-audit
 jobs use the fleet only for push events, keeping scheduled/manual callers hosted.
 Their steps, permissions and triggers are unchanged.
+Sensitive Change Review uses the fleet on every PR and review event, not just
+`opened`/`synchronize`: it checks out only default-branch scripts and runs no
+PR code, so the "actor did not supply the code" reason does not apply.
 
 The repository variable is a JSON array of string actor IDs matching the fleet
 webhook filter. The maintainer changing either fleet project's actor filter owns

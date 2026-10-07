@@ -3,6 +3,8 @@ import {
   shouldCollapse,
   countLines,
   formatToken,
+  encodeIdInvisible,
+  decodeIdInvisible,
   makePasteId,
   nextSeq,
   findTokenRanges,
@@ -43,16 +45,37 @@ describe('pasteTokens', () => {
   })
 
   describe('formatToken + regex', () => {
-    it('produces canonical token', () => {
-      expect(formatToken(block({ seq: 3, lines: 42 }))).toBe('[ Paste #3 · 42 lines ]')
+    it('renders byte-for-byte [ Paste #N · M lines ] once the invisible id is stripped', () => {
+      const b = block({ id: 'abc12', seq: 3, lines: 42 })
+      const token = formatToken(b)
+      // Every carried-id code point is zero-width (U+200b/U+200c bits fenced by
+      // U+2063), so stripping ALL of them leaves exactly the visible token —
+      // NONE of the id's characters appear on screen.
+      expect(token.replace(/[\u200b\u200c\u2063]/g, '')).toBe('[ Paste #3 · 42 lines ]')
+      // No visible id leaks: the base-36 id text is absent from the token.
+      expect(token).not.toContain('abc12')
     })
-    it('regex captures seq and lines', () => {
-      const b = block({ seq: 7, lines: 12 })
+    it('encodeIdInvisible / decodeIdInvisible round-trip, and the id run is all zero-width', () => {
+      const enc = encodeIdInvisible('mg4kx2a7ab')
+      expect(/^[\u2063\u200b\u200c]+$/.test(enc)).toBe(true)        // nothing visible
+      expect(decodeIdInvisible(enc.replace(/\u2063/g, ''))).toBe('mg4kx2a7ab')
+    })
+    it('regex captures seq, the invisible id run, and lines', () => {
+      const b = block({ id: 'z9', seq: 7, lines: 12 })
       const s = `hey ${formatToken(b)} there`
       PASTE_TOKEN_REGEX.lastIndex = 0
       const m = PASTE_TOKEN_REGEX.exec(s)
+      expect(m?.[1]).toBe('7')                      // seq
+      expect(decodeIdInvisible(m?.[2] ?? '')).toBe('z9')  // decoded id
+      expect(m?.[3]).toBe('12')                     // lines
+    })
+    it('regex still matches a legacy #N-only token (no id run)', () => {
+      const s = 'hey [ Paste #7 · 12 lines ] there'
+      PASTE_TOKEN_REGEX.lastIndex = 0
+      const m = PASTE_TOKEN_REGEX.exec(s)
       expect(m?.[1]).toBe('7')
-      expect(m?.[2]).toBe('12')
+      expect(m?.[2]).toBeUndefined()
+      expect(m?.[3]).toBe('12')
     })
   })
 
@@ -87,6 +110,61 @@ describe('pasteTokens', () => {
       const r = findTokenRanges(text, [known])
       expect(r).toHaveLength(1)
       expect(r[0].block.id).toBe('k')
+    })
+
+    // THE BUG (#13851). seq restarts at 1 after a send clears the blocks, so a
+    // recalled message's `#1` token used to resolve against whatever new block
+    // now holds seq 1. The token carries its block's id in invisible fences, so
+    // a recalled token for block A resolves to A if A is present, or to NOTHING
+    // against a composer that reused seq 1 for a different block B — never to B.
+    it('a recalled #1 token never resolves to a different draft block that reused seq 1', () => {
+      const a = block({ id: 'blocka1', seq: 1, lines: 3, content: 'AAA' })
+      const recalledText = `recalled ${formatToken(a)}` // carries A's id in fences
+      const b = block({ id: 'blockb2', seq: 1, lines: 3, content: 'BBB' }) // reused seq 1
+      const r = findTokenRanges(recalledText, [b])
+      expect(r).toHaveLength(0)
+      expect(expandAll(recalledText, [b])).toBe(recalledText) // nothing spliced
+    })
+
+    it('a recalled token still resolves to its own block when that block is present', () => {
+      const a = block({ id: 'blocka1', seq: 1, lines: 3, content: 'AAA' })
+      const b = block({ id: 'blockb2', seq: 1, lines: 3, content: 'BBB' })
+      const recalledText = `recalled ${formatToken(a)}`
+      const r = findTokenRanges(recalledText, [a, b])
+      expect(r).toHaveLength(1)
+      expect(r[0].block.id).toBe('blocka1')
+      expect(expandAll(recalledText, [a, b])).toBe('recalled AAA')
+    })
+
+    // Migration: a legacy `#N`-only token (no id fence — sent transcripts,
+    // drafts, the paste-draft store from before id-addressing) still resolves
+    // against a block that now carries an id, by its seq.
+    it('resolves a legacy #N token by seq against an id-keyed block', () => {
+      const b = block({ id: 'newid', seq: 2, lines: 4, content: 'LEGACY' })
+      const legacyText = 'old [ Paste #2 · 4 lines ] draft' // no id fence
+      const r = findTokenRanges(legacyText, [b])
+      expect(r).toHaveLength(1)
+      expect(r[0].block.id).toBe('newid')
+      expect(expandAll(legacyText, [b])).toBe('old LEGACY draft')
+    })
+
+    it('leaves a legacy #N token unresolved when its seq is ambiguous across live blocks', () => {
+      const b1 = block({ id: 'x', seq: 1, content: 'XXX' })
+      const b2 = block({ id: 'y', seq: 1, content: 'YYY' })
+      expect(findTokenRanges('[ Paste #1 · 3 lines ]', [b1, b2])).toHaveLength(0)
+    })
+
+    // A token that DOES carry a fenced id run but one that fails to decode
+    // (corrupted — e.g. clipboard text altered outside the app, so the run is
+    // not a whole number of 7-bit groups) must NOT fall back to seq: pairing it
+    // to a live same-seq block would splice that block's content in. It stays
+    // literal text. (GPT 6.1 review finding on head 93821862c6.)
+    it('does not seq-fall-back for a present-but-undecodable fenced id', () => {
+      const live = block({ id: 'livea', seq: 1, lines: 3, content: 'LIVE' })
+      // Fence + a single bit (not a multiple of 7) + fence: regex matches, decode fails.
+      const garbled = '[ Paste #1\u2063\u200b\u2063 · 3 lines ]'
+      expect(findTokenRanges(garbled, [live])).toHaveLength(0)
+      expect(expandAll(garbled, [live])).toBe(garbled) // never splices LIVE's content
     })
   })
 
@@ -133,7 +211,7 @@ describe('pasteTokens', () => {
   describe('recollapsePastes', () => {
     it('folds a whole-message paste back to its token', () => {
       const b = block({ id: 'a', seq: 1, lines: 3, content: 'l1\nl2\nl3' })
-      expect(recollapsePastes('l1\nl2\nl3', [b])).toBe('[ Paste #1 · 3 lines ]')
+      expect(recollapsePastes('l1\nl2\nl3', [b])).toBe(formatToken(b))
     })
 
     it('is the inverse of expandAll for a chip embedded in surrounding text', () => {
@@ -181,13 +259,13 @@ describe('pasteTokens', () => {
       const b = block({ id: 'a', seq: 1, lines: 3, content: 'l1\nl2\nl3\n' })
       // Stored content: block text minus its trailing newline (backend trimEnd).
       const stored = 'l1\nl2\nl3'
-      expect(recollapsePastes(stored, [b])).toBe('[ Paste #1 · 3 lines ]')
+      expect(recollapsePastes(stored, [b])).toBe(formatToken(b))
     })
 
     it('collapses a whitespace-stripped tail block embedded after prefix text', () => {
       const b = block({ id: 'a', seq: 2, lines: 2, content: 'A\nB  \n' })
       const stored = 'hi A\nB' // prefix + block with trailing "  \n" stripped
-      expect(recollapsePastes(stored, [b])).toBe('hi [ Paste #2 · 2 lines ]')
+      expect(recollapsePastes(stored, [b])).toBe(`hi ${formatToken(b)}`)
     })
 
     it('prefers the verbatim match for an interior block whose trailing whitespace is preserved', () => {
@@ -196,7 +274,7 @@ describe('pasteTokens', () => {
       // must not fire and swallow the trailing newline into the token.
       const b = block({ id: 'a', seq: 1, lines: 2, content: 'X\nY\n' })
       const stored = 'X\nY\nafter'
-      expect(recollapsePastes(stored, [b])).toBe('[ Paste #1 · 2 lines ]after')
+      expect(recollapsePastes(stored, [b])).toBe(`${formatToken(b)}after`)
     })
   })
 
@@ -259,7 +337,7 @@ describe('pasteTokens', () => {
       const b = block({ id: 'a', seq: 1, lines: 3, content: 'l1\nl2\nl3' })
       const incoming = [{ role: 'user', content: 'l1\nl2\nl3', meta: { pastes: [b] } }]
       const out = mergePreservedPastes([], incoming)
-      expect(out[0].content).toBe('[ Paste #1 · 3 lines ]')
+      expect(out[0].content).toBe(formatToken(b))
       expect((out[0].meta as { pastes: PasteBlock[] }).pastes).toEqual([b])
     })
 

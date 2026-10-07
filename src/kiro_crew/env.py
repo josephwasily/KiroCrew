@@ -258,6 +258,12 @@ _NODE_MANAGER_GLOBS = (
     # fnm, both layouts: XDG default and legacy ``~/.fnm``.
     "{home}/.local/share/fnm/node-versions/*/installation/bin",
     "{home}/.fnm/node-versions/*/installation/bin",
+    # fnm's out-of-the-box location on macOS: fnm does NOT follow XDG there,
+    # it uses the Apple data dir (``~/Library/Application Support/fnm``). This
+    # is the default on a plain macOS install with no ``FNM_DIR``/``XDG_DATA_HOME``
+    # override, so a glob tried on every platform (it harmlessly drops out where
+    # the dir does not exist) is what keeps the probe from a false "no Node".
+    "{home}/Library/Application Support/fnm/node-versions/*/installation/bin",
     # The layout the retired nvm/fnm scan also globbed (``<ver>/bin`` directly
     # under the fnm root). Real fnm never produces it, but keeping the glob
     # makes the consolidated search a strict superset of what it replaced —
